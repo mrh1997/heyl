@@ -502,6 +502,27 @@ pub fn get(located: &Located, format: Format) {
     }
 }
 
+/// `run`'s notes, on stderr: which variables a ranking chose, and which
+/// replace a value heyl inherited. Names only — never a value.
+///
+/// Nothing goes to stdout under any `--format`: stdout belongs to the child.
+pub fn run_notes(variables: &[heyl_app::run::Variable]) {
+    for variable in variables {
+        if variable.candidates > 1 {
+            eprintln!(
+                "heyl: {} logins yield {}; using the first by vault (private first), then the most recently changed.",
+                variable.candidates, variable.name
+            );
+        }
+        if std::env::var_os(&variable.name).is_some() {
+            eprintln!(
+                "heyl: {} is already set in the environment; the project's value replaces it.",
+                variable.name
+            );
+        }
+    }
+}
+
 /// A single field value.
 fn get_value(value: &str, format: Format) {
     if format.is_json() {

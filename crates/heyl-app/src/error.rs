@@ -146,6 +146,29 @@ pub enum AppError {
     #[error("a login is required: pass --login-title or --login-id")]
     MissingLoginSelector,
 
+    /// A `--project` value `run` cannot take.
+    #[error("--project is not a valid project URL: {reason}")]
+    BadProject {
+        /// What was wrong with it.
+        reason: &'static str,
+    },
+
+    /// No live login carries the project's prefix.
+    ///
+    /// Names nothing beyond what the caller typed, like every miss.
+    #[error("no login belongs to this project")]
+    NoProjectSecrets,
+
+    /// A login's name yields something after the `#` that is not a portable
+    /// environment variable name. Names the login by id, never by value.
+    #[error(
+        "login {login} does not name a valid environment variable after the #;          expected letters, digits and _, not starting with a digit"
+    )]
+    InvalidVariableName {
+        /// The offending login.
+        login: heyl_domain::LoginId,
+    },
+
     /// A protected value's ciphertext was not valid base64.
     #[error("a protected value is stored in a form heyl cannot read")]
     CorruptProtectedValue,
@@ -252,6 +275,7 @@ impl AppError {
             | Self::NoSuchVault
             | Self::NoSuchLogin
             | Self::NoSuchField
+            | Self::NoProjectSecrets
             | Self::Port(heyl_ports::PortError::NotFound { .. }) => ExitCode::NotFound,
 
             // The caller asked to make something that is already there. The
@@ -268,6 +292,8 @@ impl AppError {
             | Self::MalformedSelector { .. }
             | Self::ConflictingSelectors { .. }
             | Self::MissingLoginSelector
+            | Self::BadProject { .. }
+            | Self::InvalidVariableName { .. }
             | Self::NotConfirmed => ExitCode::Invalid,
 
             _ => ExitCode::Failure,

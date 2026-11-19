@@ -107,7 +107,7 @@ python3 -m venv .venv && ./.venv/bin/pip install protobuf
 heyl get -l github.com -f password
 heyl totp aws-prod
 heyl list --format json | jq -r '.[].title'
-heyl run --env-file .env.tpl -- terraform apply
+heyl run --project github.com/mrh1997/heyl/prod -- terraform apply
 ```
 
 Read-only by design: it never creates, edits or deletes logins. The single exception is

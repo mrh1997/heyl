@@ -26,6 +26,29 @@ pub enum VaultSelector {
     Id(VaultId),
 }
 
+impl VaultSelector {
+    /// Build a vault selector from `-v`/`-V`, shared by `get` and `run`.
+    ///
+    /// # Errors
+    /// [`AppError::ConflictingSelectors`] for both, [`AppError::MalformedSelector`]
+    /// for an id that is not a UUID — both exit 7.
+    pub fn from_flags(name: Option<String>, id: Option<String>) -> Result<Self, AppError> {
+        match (name, id) {
+            (Some(_), Some(_)) => Err(AppError::ConflictingSelectors {
+                a: "--vault-name",
+                b: "--vault-id",
+            }),
+            (Some(name), None) => Ok(Self::Name(name)),
+            (None, Some(id)) => {
+                Ok(Self::Id(VaultId::parse(&id).map_err(|_| {
+                    AppError::MalformedSelector { what: "--vault-id" }
+                })?))
+            }
+            (None, None) => Ok(Self::Any),
+        }
+    }
+}
+
 /// Which login to read.
 #[derive(Debug, Clone)]
 pub enum LoginSelector {
@@ -77,20 +100,7 @@ impl Query {
         field_name: Option<String>,
         field_id: Option<String>,
     ) -> Result<Self, AppError> {
-        let vault = match (vault_name, vault_id) {
-            (Some(_), Some(_)) => {
-                return Err(AppError::ConflictingSelectors {
-                    a: "--vault-name",
-                    b: "--vault-id",
-                });
-            }
-            (Some(name), None) => VaultSelector::Name(name),
-            (None, Some(id)) => VaultSelector::Id(
-                VaultId::parse(&id)
-                    .map_err(|_| AppError::MalformedSelector { what: "--vault-id" })?,
-            ),
-            (None, None) => VaultSelector::Any,
-        };
+        let vault = VaultSelector::from_flags(vault_name, vault_id)?;
         let login = match (login_title, login_id) {
             (Some(_), Some(_)) => {
                 return Err(AppError::ConflictingSelectors {
@@ -252,20 +262,23 @@ pub async fn run(
 }
 
 /// A matching login, with what it takes to rank it and decrypt it.
-struct Candidate {
-    tier: u8,
-    login: Login,
-    protected: ProtectedSecret,
+///
+/// Shared with `run`, which ranks duplicate variables the way `get` ranks
+/// duplicate logins.
+pub(crate) struct Candidate {
+    pub(crate) tier: u8,
+    pub(crate) login: Login,
+    pub(crate) protected: ProtectedSecret,
 }
 
 /// An opened, folded login vault and the key that decrypts its secrets.
-struct Opened {
-    document: heyl_vault::Document,
-    protected: ProtectedSecret,
+pub(crate) struct Opened {
+    pub(crate) document: heyl_vault::Document,
+    pub(crate) protected: ProtectedSecret,
 }
 
 /// The vaults a selector puts in scope, in tier order.
-async fn resolve_scope<'a>(
+pub(crate) async fn resolve_scope<'a>(
     ports: &Ports<'_>,
     session: &'a Unlocked,
     selector: &VaultSelector,
@@ -375,7 +388,7 @@ async fn team_name(
 }
 
 /// Open a login (or groupMeta) vault: unlock both tiers, fold every commit.
-async fn open_vault(
+pub(crate) async fn open_vault(
     ports: &Ports<'_>,
     session: &Unlocked,
     summary: &heyl_domain::VaultSummary,
@@ -459,20 +472,25 @@ fn login_matches(login: &Login, selector: &LoginSelector) -> bool {
 
 /// The read ranking: liveness, then vault tier, then most recently changed,
 /// then id (DESIGN.md §5). The first is the winner.
-fn rank(mut candidates: Vec<Candidate>) -> Option<Candidate> {
-    candidates.sort_by(|a, b| {
-        (a.login.liveness() as u8)
-            .cmp(&(b.login.liveness() as u8))
-            .then(a.tier.cmp(&b.tier))
-            // Most recently changed first: reverse the recency comparison.
-            .then(b.login.recency().cmp(a.login.recency()))
-            .then(a.login.id.to_string().cmp(&b.login.id.to_string()))
-    });
+pub(crate) fn rank(mut candidates: Vec<Candidate>) -> Option<Candidate> {
+    candidates.sort_by(|a, b| ranking((&a.login, a.tier), (&b.login, b.tier)));
     candidates.into_iter().next()
 }
 
+/// The order [`rank`] sorts by, for a caller ranking something other than a
+/// [`Candidate`] — `run` ranks before it decrypts anything.
+pub(crate) fn ranking(a: (&Login, u8), b: (&Login, u8)) -> std::cmp::Ordering {
+    let ((a, a_tier), (b, b_tier)) = (a, b);
+    (a.liveness() as u8)
+        .cmp(&(b.liveness() as u8))
+        .then(a_tier.cmp(&b_tier))
+        // Most recently changed first: reverse the recency comparison.
+        .then(b.recency().cmp(a.recency()))
+        .then(a.id.to_string().cmp(&b.id.to_string()))
+}
+
 /// A login's vault tier, the second ranking key.
-const fn tier(vault_type: VaultType) -> u8 {
+pub(crate) const fn tier(vault_type: VaultType) -> u8 {
     match vault_type {
         VaultType::Private => 0,
         VaultType::OrganizationPersonal => 1,
@@ -577,7 +595,7 @@ fn resolve(value: &FieldValue, protected: &ProtectedSecret) -> Result<String, Ap
 
 /// Open one `ProtectedValue`. An `isEmpty` value needs no key and is the empty
 /// string.
-fn decrypt(protected: &ProtectedSecret, value: &Protected) -> Result<String, AppError> {
+pub(crate) fn decrypt(protected: &ProtectedSecret, value: &Protected) -> Result<String, AppError> {
     if value.is_empty {
         return Ok(String::new());
     }

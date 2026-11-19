@@ -172,6 +172,37 @@ enum Command {
         field_id: Option<String>,
     },
 
+    /// Run a command with a project's secrets in its environment.
+    ///
+    /// Every live login whose name, title or website is `<project>#<VARIABLE>`
+    /// becomes one variable: the
+    /// part after the `#` is its name, the login's password its value. So with
+    /// `--project github.com/me/app/prod`, a login named
+    /// `github.com/me/app/prod#DATABASE_URL` sets `DATABASE_URL`.
+    ///
+    /// Without `-v`/`-V`, every readable login vault except the inbox is
+    /// searched; with one, only that vault. The command after `--` inherits
+    /// heyl's environment plus these variables, and its exit code is heyl's.
+    /// The values never reach disk, argv or stdout.
+    Run {
+        /// The project, e.g. `github.com/me/app` or `github.com/me/app/prod`.
+        #[arg(long, value_name = "PROJECT")]
+        project: String,
+
+        /// Search only this vault, by name: `private`, `inbox`, an
+        /// organisation, or a team.
+        #[arg(short = 'v', long = "vault-name", value_name = "NAME")]
+        vault_name: Option<String>,
+
+        /// Search only this vault, by id.
+        #[arg(short = 'V', long = "vault-id", value_name = "UUID")]
+        vault_id: Option<String>,
+
+        /// The command to run, after `--`.
+        #[arg(last = true, required = true, value_name = "COMMAND")]
+        command: Vec<std::ffi::OsString>,
+    },
+
     /// Sessions: this machine's devices on the account.
     ///
     /// A session is what your phone approves, and what it names when it asks.
@@ -394,6 +425,18 @@ async fn run(cli: Cli) -> Result<std::process::ExitCode, AppError> {
             Ok(std::process::ExitCode::SUCCESS)
         }
 
+        Command::Run {
+            project,
+            vault_name,
+            vault_id,
+            command,
+        } => {
+            run_project(
+                &ports, &slot, cli.wait, &project, vault_name, vault_id, &command,
+            )
+            .await
+        }
+
         Command::Session { command } => {
             session(&ports, command, &slot, cli.wait, cli.qr.into(), cli.format).await
         }
@@ -415,6 +458,66 @@ async fn run(cli: Cli) -> Result<std::process::ExitCode, AppError> {
             })
         }
     }
+}
+
+/// `heyl run`: resolve the project's variables, then run the command with
+/// them and exit as it did.
+async fn run_project(
+    ports: &heyl_app::Ports<'_>,
+    slot: &Slot,
+    wait: Option<u64>,
+    project: &str,
+    vault_name: Option<String>,
+    vault_id: Option<String>,
+    command: &[std::ffi::OsString],
+) -> Result<std::process::ExitCode, AppError> {
+    let project = heyl_app::run::Project::parse(project)?;
+    let vault = heyl_app::get::VaultSelector::from_flags(vault_name, vault_id)?;
+    let variables = heyl_app::run::run(ports, slot, &project, &vault, wait).await?;
+    // Before the child starts, not after it exits: a strict slot must
+    // not stay unlocked for as long as a build runs (DESIGN.md §5).
+    heyl_app::session::finish(ports, slot).await;
+    output::run_notes(&variables);
+
+    let (program, args) = command
+        .split_first()
+        .expect("clap requires at least one word after --");
+    let outcome = heyl_platform::child::run(
+        program,
+        args,
+        variables
+            .iter()
+            .map(|v| (v.name.as_str(), v.value.as_str())),
+    )
+    .await;
+    // The values are wiped here, before heyl reports anything.
+    drop(variables);
+
+    match outcome {
+        Ok(code) => Ok(child_exit(code)),
+        Err(e) => {
+            eprintln!("heyl: cannot run {}: {e}", program.to_string_lossy());
+            // A shell's codes for "not found" and "not executable", so
+            // a script cannot mistake them for the child's own exit.
+            Ok(std::process::ExitCode::from(
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                },
+            ))
+        }
+    }
+}
+
+/// heyl's exit code for a child that exited with `code`.
+///
+/// Codes in `0..=255` pass through. Windows reports wider ones — an NTSTATUS
+/// such as `0xC000013A` for a Ctrl-C — which `ExitCode` cannot carry, so those
+/// leave through `process::exit` with the value intact. Nothing secret is
+/// live by then: the variables were dropped before this is reached.
+fn child_exit(code: i32) -> std::process::ExitCode {
+    u8::try_from(code).map_or_else(|_| std::process::exit(code), std::process::ExitCode::from)
 }
 
 /// Dispatch one `heyl session` verb.

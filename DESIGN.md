@@ -17,7 +17,7 @@ pipe it into other tools, inject it into a child process's environment.
 $ heyl get -l github.com -f password
 $ heyl totp aws-prod
 $ heyl list --format json | jq -r '.[].title'
-$ heyl run --env-file .env.tpl -- terraform apply
+$ heyl run --project github.com/mrh1997/heyl/prod -- terraform apply
 ```
 
 The reference points are `op read` and `pass show`, not a terminal UI for managing a vault.
@@ -973,11 +973,105 @@ and what `heyl api call Sync` prints feeds straight back into `heyl api derive -
 Retired by it: `heyl-fixtures probe-signing`, which existed to vary `client-type`, the
 authenticator and the signature on one RPC. `heyl api call` varies all three on any of them.
 
-### `run`
+### `run` — a project's secrets, by naming convention
 
-`heyl run --env-file .env.tpl -- <cmd>` resolves `heyl://<vault>/<item>/<field>`
-references in the template into the child's environment. Secrets are passed via the environment
-of the spawned process only — never written to disk, never in argv, never in shell history.
+```
+heyl run --project <project>       (required)
+         [-v <name> | -V <uuid>]   (vault, optional)
+         -- <cmd> [args…]
+```
+
+`run` is **project-based**: there is no template file listing which secret goes where. The vault
+itself says it, through the names of its logins. A project is written like a web address without
+a scheme — a repository, optionally narrowed to an environment:
+
+```
+--project github.com/mrh1997/heyl          the project as a whole
+--project github.com/mrh1997/heyl/prod     its prod environment
+```
+
+There is no `heyl://` or other scheme, neither in `--project` nor in the logins' names: a project
+login is named like any web page, plus a `#` and the variable —
+`github.com/mrh1997/heyl#TEST_CREDENTIAL`.
+
+**Resolution.** heyl appends `#` to the project and takes that as a **prefix**. Every login
+whose name starts with it contributes one variable: the part of the name **after the `#`** is the
+variable's name, the login's **password** is its value.
+
+| Login name | With `--project github.com/mrh1997/heyl/prod` |
+|---|---|
+| `github.com/mrh1997/heyl/prod#DATABASE_URL` | `DATABASE_URL=<its password>` |
+| `github.com/mrh1997/heyl/prod#STRIPE_KEY` | `STRIPE_KEY=<its password>` |
+| `github.com/mrh1997/heyl#DATABASE_URL` | not included — a different prefix |
+| `github.com/mrh1997/heyl/production#X` | not included — the `#` must follow the project directly |
+| `github.com` (an ordinary login) | not included — no `#` |
+
+The resolved variables are added to heyl's own environment, and the result is the environment of
+`<cmd>`, which heyl spawns with the arguments after `--` untouched. stdin, stdout and stderr are
+inherited.
+
+The `#` is what makes the match exact: a project's prefix can never be the start of another
+project's or another environment's names, so `…/heyl` never picks up `…/heyl/prod`, and `…/prod`
+never picks up `…/production`. It is also what keeps project logins apart from ordinary ones: a
+login named `github.com` has no `#`, so no project ever picks it up.
+
+**`--project` is validated** before anything is fetched (exit 7): it must not be empty, must not
+end in `/` (the `#` would then follow a slash no stored name has), and must not contain `#` or a
+scheme such as `heyl://` or `https://` — a value that can never match a stored name is a mistake
+worth reporting, not a silent "no login belongs to this project".
+
+**Rules:**
+
+- **Name** — the prefix is matched against the login's name (`displayHeadline`), its `title`,
+  and each of its **websites**, in that order; the first that carries it wins. The website field
+  is where the heylogin app stores a project login typed in as an address (name and title stay
+  empty then), so it counts, and a leading `https://` or `http://` on a stored website is
+  ignored. Matching is **case-sensitive**: the part after `#` becomes a variable name verbatim,
+  and a case-folded match would make `Path` and `PATH` the same entry on one platform and two on
+  another.
+- **Scope** — without `-v`/`-V`, every readable login vault **except INBOX** is searched (an inbox
+  holds what *other people* sent you — see the security note below); `-v`/`-V` restrict the
+  search to one vault, exactly as for `get`, and may name the inbox explicitly.
+- **Liveness** — only live logins count. Archived and deleted ones are skipped, unlike `get`: a
+  login you deleted must not keep injecting itself into builds.
+- **Duplicates** — two live logins yielding the same variable are ranked as `get` ranks
+  (vault tier, then most recently changed, then id); the winner is used, and a note on stderr
+  names the **variable** (never a value) and how many candidates there were.
+- **Variable names** — the part after `#` must be a portable environment variable name,
+  `[A-Za-z_][A-Za-z0-9_]*`. A login that yields anything else fails the command (exit 7) before
+  `<cmd>` starts, naming the login's id — not silently skipped, because a typo would otherwise
+  surface as a missing variable deep inside someone else's tool.
+- **Empty password** — sets the variable to the empty string, as an empty `get -f` is a
+  successful read, not a miss.
+- **No match** — no login carries the prefix: exit 2, and `<cmd>` does not run. Running it
+  without its secrets would turn a typo in `--project` into a confusing failure further on.
+- **Clash with the inherited environment** — a resolved variable replaces one heyl inherited, with
+  a note on stderr naming it, so a stale `export` in the shell cannot silently win.
+- **Fields** — only the password is used. A login's other fields and custom fields are not read
+  into the environment; one variable is one login.
+
+**Exit codes.** Until `<cmd>` starts, heyl's own codes apply (§5): 2 no match, 4 unlock required,
+7 an invalid variable name, and so on. Once it has started, heyl exits with **`<cmd>`'s** code,
+so `heyl run … -- make test` slots into scripts and CI unchanged.
+
+**Unlock and strict sessions.** `run` unlocks like every read, asking the phone if needed and
+bounded by `--wait`. The secrets are resolved and the session's policy is honoured **before**
+`<cmd>` starts: a strict slot re-locks before the child runs, not after it exits, so a
+long-running child does not hold the unlock open.
+
+**Secrets.** Values exist only in heyl's memory and in the child's environment — never written to
+disk, never in argv, never in shell history, never in output. `--format json` does not change
+this: `run` prints nothing of its own on stdout, which belongs to `<cmd>`.
+
+**Security note ⚠ PROPOSED.** A login's name decides a variable's *name*, so whoever can create a
+login in a searched vault can set any variable in your build — including the ones that load code:
+`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `PYTHONPATH`, `RUBYOPT`, and the
+like. That is why the default search skips INBOX, which anyone can send to. Team and organisation
+vaults are searched by default because their writers are people you already share secrets with;
+a shared vault you trust less belongs behind an explicit `-v`. Ranking puts PRIVATE first, so a
+shared vault cannot *override* one of your own variables — but it can still *add* one. A denylist
+of code-loading variable names would close the obvious cases and is left open: any such list is
+incomplete by construction.
 
 ### QR rendering, and the SAS alternative (M4)
 

@@ -11,6 +11,7 @@
 //! needed only by `CreateChallenge` at login time. Nothing through M5 has a use
 //! for a state directory, so the five platform ports may turn out to be four.
 
+pub mod child;
 pub mod clock;
 pub mod headless;
 pub mod keychain;

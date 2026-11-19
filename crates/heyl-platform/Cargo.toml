@@ -23,7 +23,9 @@ heyl-domain = { workspace = true }
 heyl-ports  = { workspace = true }
 
 async-trait = { workspace = true }
-tokio       = { workspace = true, features = ["time"] }
+# `process` and `signal` are `heyl run`'s: spawning the child, and ignoring
+# the interrupt that belongs to it while it runs (`child.rs`).
+tokio       = { workspace = true, features = ["time", "process", "signal"] }
 qrcode      = { workspace = true }
 jiff        = { workspace = true }
 keyring     = { workspace = true }

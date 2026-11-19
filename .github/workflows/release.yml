@@ -1,0 +1,304 @@
+name: Release
+
+# Nightly, and only when `main` moved since the last release. The version is the
+# UTC date -- `2026.11.19`, no leading zeros, because Cargo's semver rejects them
+# -- and a release is a real commit on `main`: the `heyl` crate's version set to
+# that date, and CHANGELOG.md's pending entries turned into a `## Release`
+# chapter. That commit is tagged `v<version>`, and it is the commit every
+# artifact below is built from, so the build sha a binary prints, the tag and
+# `main` all name the same thing.
+#
+# Order matters for what a failure leaves behind:
+#   prepare -> ci -> build -> land -> pypi -> github-release
+# Until `land`, the release commit lives only on a scratch branch, so a red CI
+# or a failed build publishes nothing and the next night simply tries again.
+on:
+  # GitHub's cron is UTC.
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and smoke-test the wheels, but land and publish nothing
+        type: boolean
+        default: true
+
+# One release run at a time. Never cancelled: a run killed between `land` and
+# `pypi` would leave a tag with nothing behind it.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: decide version · release commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      # A real release is cut from `main` and nowhere else. A dry run may come
+      # from any branch -- that is how this file gets tested before it merges.
+      - name: Refuse a real release off main
+        if: ${{ github.ref != 'refs/heads/main' && !inputs.dry_run }}
+        run: |
+          echo "::error::A non-dry-run release must be started from main, not $GITHUB_REF"
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Anything new since the last release?
+        id: plan
+        run: |
+          version="$(date -u +%Y.%-m.%-d)"
+          last="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
+          if [ -n "$last" ] && [ "$(git rev-parse "$last^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            echo "::notice::No commits since $last -- nothing to release."
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::notice::v$version already exists -- one release per day."
+            exit 0
+          fi
+          echo "Releasing $version (previous: ${last:-none})"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        if: steps.plan.outputs.version
+        with:
+          cache: false
+
+      # Only the `heyl` crate carries the product version. The eight library
+      # crates are not published anywhere and stay at 0.0.0.
+      - name: Write the version, close the changelog chapter, commit
+        id: commit
+        if: steps.plan.outputs.version
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          manifest=crates/heyl-cli/Cargo.toml
+          sed -i -E "0,/^version *= *\"[^\"]*\"/s//version     = \"$VERSION\"/" "$manifest"
+          grep -q "^version *= *\"$VERSION\"" "$manifest" \
+            || { echo "::error::could not set the version in $manifest"; exit 1; }
+          # Rewrites Cargo.lock's entry for `heyl`, and nothing else.
+          cargo metadata --format-version 1 > /dev/null
+
+          # Everything above the first `## Release` heading is unreleased; a
+          # heading right under the title makes it this release's chapter.
+          awk -v v="$VERSION" '
+            !done && /^# / { print; print ""; print "## Release " v; done = 1; next }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.md.new
+          mv CHANGELOG.md.new CHANGELOG.md
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $VERSION"
+          git push --force origin "HEAD:refs/heads/release/v$VERSION"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # The whole of CI -- fmt, clippy, the test suite on all five targets,
+  # dependency rules, cargo-deny -- against the release commit itself.
+  ci:
+    needs: prepare
+    if: needs.prepare.outputs.version
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+
+  build:
+    name: wheel · ${{ matrix.target }}
+    needs: [prepare, ci]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      # The same five targets and runner pins as ci.yml, which carries the
+      # reasoning. Linux binaries are static musl, so one wheel serves glibc
+      # and musl distributions alike: it carries both platform tags.
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            bin: heyl
+            retag: manylinux_2_17_x86_64.manylinux2014_x86_64.musllinux_1_2_x86_64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            bin: heyl
+            retag: manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_2_aarch64
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            bin: heyl
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            bin: heyl.exe
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            bin: heyl.exe
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: ${{ matrix.target }}
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Resolve the build sha
+        run: |
+          sha="$RELEASE_SHA"
+          echo "HEYL_BUILD_SHA=${sha:0:7}" >> "$GITHUB_ENV"
+
+      # Natively, like ci.yml -- no manylinux container, no zig. `pyproject.toml`
+      # at the root says what to package: the `heyl` binary, as `bin` bindings.
+      - name: Build the wheel
+        run: |
+          compat=pypi
+          case "${{ matrix.target }}" in *-linux-musl) compat=musllinux_1_2 ;; esac
+          uvx 'maturin>=1.9,<2' build --release --locked \
+            --target ${{ matrix.target }} --compatibility "$compat" --out dist
+
+      - name: Tag the static Linux wheel for glibc as well
+        if: matrix.retag
+        run: |
+          uvx wheel tags --remove --platform-tag '${{ matrix.retag }}' dist/*.whl
+          ls dist
+
+      # Exactly what a user does, against exactly the wheel that ships: uv has
+      # to accept its tags on this platform, install it, and the binary has to
+      # start -- past `harden_process()` -- and report the version just set.
+      - name: Smoke the wheel through uvx
+        run: |
+          out="$(uvx --no-cache --from dist/*.whl heyl --version)"
+          echo "$out"
+          [ "$out" = "heyl $VERSION ($HEYL_BUILD_SHA)" ] \
+            || { echo "::error::expected 'heyl $VERSION ($HEYL_BUILD_SHA)'"; exit 1; }
+
+      - name: Package the raw binary
+        run: |
+          name="heyl-$VERSION-${{ matrix.target }}"
+          cd target/${{ matrix.target }}/release
+          case "${{ matrix.bin }}" in
+            *.exe) 7z a -tzip "$GITHUB_WORKSPACE/dist/$name.zip" heyl.exe > /dev/null ;;
+            *)     tar czf "$GITHUB_WORKSPACE/dist/$name.tar.gz" heyl ;;
+          esac
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: archive-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  # Fast-forward only: if `main` moved while this run built, the push is
+  # rejected, nothing is published, and the next night releases both.
+  land:
+    name: land on main · tag
+    needs: [prepare, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: |
+          git fetch origin "release/v$VERSION"
+          git tag "v$VERSION" "$SHA"
+          git push --atomic origin "$SHA:refs/heads/main" "refs/tags/v$VERSION"
+
+  pypi:
+    name: publish to PyPI
+    needs: land
+    runs-on: ubuntu-latest
+    # Trusted publishing: PyPI accepts this workflow, in this environment, from
+    # this repository, and nothing else -- there is no token to leak.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/heyl/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub release
+    needs: [prepare, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-*'
+          path: dist
+          merge-multiple: true
+      - name: Release notes from this version's CHANGELOG chapter
+        run: |
+          awk -v h="## Release $VERSION" '
+            $0 == h { on = 1; next }
+            on && /^## Release / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || echo "No changelog entries." > notes.md
+          cat notes.md
+      - name: Publish
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          gh release create "v$VERSION" * \
+            --verify-tag --title "heyl $VERSION" --notes-file ../notes.md
+
+  # The scratch branch is only a carrier between jobs. Whatever happened --
+  # landed, failed, dry run -- it goes.
+  cleanup:
+    name: delete the scratch branch
+    needs: [prepare, ci, build, land]
+    if: ${{ always() && needs.prepare.outputs.sha }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: git push origin --delete "release/v$VERSION"
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}

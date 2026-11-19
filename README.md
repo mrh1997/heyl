@@ -17,6 +17,16 @@ vault decrypts; [`DESIGN.md`](DESIGN.md) §6 is where that evidence lives, and h
 
 It is not usable as a password manager yet — reading logins is the next milestone.
 
+Install, or run without installing — prebuilt for Linux, macOS (Apple Silicon) and Windows, on
+x86_64 and ARM64, released nightly when `main` changed ([`CHANGELOG.md`](CHANGELOG.md)):
+
+```sh
+uvx heyl --help             # run the latest release
+uv tool install heyl        # or put `heyl` on PATH
+```
+
+Plain binaries are attached to each [GitHub release](https://github.com/mrh1997/heyl/releases).
+
 What the binary does today:
 
 ```sh

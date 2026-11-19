@@ -19,12 +19,12 @@ use heyl_app::{AppError, ExitCode};
 /// What `--version` prints: the crate version, and the commit it was built
 /// from.
 ///
-/// `HEYL_BUILD_SHA` is set by the artifact build in
-/// `.github/workflows/ci.yml`. `option_env!` is what keeps a plain
-/// `cargo build` working without it -- and printing no sha there is the honest
-/// answer, because a local build is a working tree rather than a commit. Until
-/// a version number is actually assigned (DESIGN.md §7) every build says
-/// `0.0.0`, so the sha is the only thing that tells two binaries apart.
+/// `HEYL_BUILD_SHA` is set by the artifact builds in `.github/workflows/ci.yml`
+/// and `release.yml`. `option_env!` is what keeps a plain `cargo build` working
+/// without it -- and printing no sha there is the honest answer, because a
+/// local build is a working tree rather than a commit. The version is the date
+/// of the last nightly release (DESIGN.md §7), which every commit after it
+/// still carries, so the sha is what tells two binaries apart between releases.
 ///
 /// A `LazyLock<String>` rather than a `const`: the two halves cannot be
 /// concatenated at compile time without pulling in a crate for it, and passing

@@ -7,6 +7,15 @@ on:
   # Artifacts on demand: the build matrix below uploads a binary per target,
   # and this is how you get one without pushing a commit.
   workflow_dispatch:
+  # The release workflow's gate: it runs this whole file against the release
+  # commit it is about to land, which is not the commit that triggered it --
+  # hence `ref`, which every checkout below honours. Empty on push and PR.
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check out instead of the triggering one
+        type: string
+        default: ''
 
 # Nine jobs a run rather than three, which is the point at which a superseded
 # run is worth cancelling. On main the group carries the run id -- which never
@@ -25,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       # Reads rust-toolchain.toml -- channel and components come from there, so
       # the pin lives in one place. Wraps Swatinem/rust-cache internally, and
       # adds problem matchers so cargo and rustfmt findings annotate the diff.
@@ -83,6 +94,8 @@ jobs:
             bin: heyl.exe
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: ${{ matrix.target }}
@@ -99,7 +112,7 @@ jobs:
       - name: Resolve the build sha
         shell: bash
         run: |
-          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          sha="${{ inputs.ref || github.event.pull_request.head.sha || github.sha }}"
           echo "HEYL_BUILD_SHA=${sha:0:7}" >> "$GITHUB_ENV"
 
       # Debug, deliberately: `overflow-checks` are on there, and this is a
@@ -138,6 +151,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       # DESIGN.md §4's crate edges, and the workspace-lints opt-in that carries
       # `unsafe_code = "forbid"`.
@@ -148,6 +163,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
       # Runs in its own container; needs no Rust toolchain of ours.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:

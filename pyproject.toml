@@ -1,0 +1,35 @@
+# PyPI packaging of the `heyl` binary, so `uvx heyl` / `uv tool install heyl`
+# work. There is no Python code: maturin's `bin` bindings put the compiled
+# executable into a `py3-none-<platform>` wheel as a script, and the installer
+# puts it on PATH. Wheels only -- an sdist would make pip/uv compile the whole
+# workspace on a machine without a wheel, which DESIGN.md's distribution table
+# rules out. `.github/workflows/release.yml` builds and publishes them.
+[build-system]
+requires      = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name            = "heyl"
+# Version, description, license and authors come from Cargo.toml, so the
+# release workflow has exactly one place to write the version into.
+dynamic         = ["version", "description", "license", "authors"]
+readme          = "README.md"
+requires-python = ">=3.8"
+license-files   = ["LICENSE", "NOTICE"]
+keywords        = ["heylogin", "password-manager", "cli"]
+classifiers     = [
+    "Environment :: Console",
+    "Programming Language :: Rust",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Repository = "https://github.com/mrh1997/heyl"
+Changelog  = "https://github.com/mrh1997/heyl/blob/main/CHANGELOG.md"
+
+[tool.maturin]
+bindings      = "bin"
+# The workspace root holds no package; the shipped binary is this crate.
+manifest-path = "crates/heyl-cli/Cargo.toml"

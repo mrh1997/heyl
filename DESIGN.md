@@ -641,7 +641,7 @@ endorsement; everything here gets pinned.
 | **Snapshot tests** | `insta` | 1.48 | Vault-decode and output-format fixtures. |
 | **CLI tests** | `assert_cmd`, `predicates` | — | Exit codes and the stdout/stderr contract of §5. |
 | **Property tests** | `proptest` | 1.x | heymerge round-trip fidelity. |
-| **Packaging** | `cargo-dist` | 0.32 | Cross-platform binaries + installers for M7. |
+| **Packaging** | `maturin` | 1.x | PyPI wheels around the release binary (`bin` bindings), built per target by `.github/workflows/release.yml`. `cargo-dist` remains the candidate for installers and npm. |
 | **TLS roots** | `rustls-platform-verifier` | 0.6 | OS trust store — matches what heylogin's browser-based clients do, and survives TLS-inspecting corporate proxies. |
 | **Async runtime** | `tokio` | 1.x | `current_thread` flavour: measured ~650 µs cheaper per invocation than `multi_thread`, identical binary size. |
 
@@ -683,12 +683,25 @@ means being able to build and test it on every change, and that is no longer tru
 
 | Channel | Artifact | Compiles on user's machine? |
 |---|---|---|
-| GitHub Releases | static binary per target + curl installer (musl needs a C cross-toolchain — see §4) | no |
+| GitHub Releases | ✅ archived binary per target + `SHA256SUMS`, nightly; a curl installer is still to do | no |
 | npm | platform packages via `optionalDependencies`, wrapping the same binary | no |
-| PyPI | platform-tagged wheels via `maturin`, wrapping the same binary | no |
+| PyPI | ✅ platform-tagged wheels via `maturin`, wrapping the same binary — `uvx heyl` | no |
 | crates.io | source | **yes** |
 
-One build feeds the first three; `cargo-dist` produces them. crates.io is the odd one out and
+**Releases are nightly and date-versioned.** `.github/workflows/release.yml` runs at 02:00 UTC
+and does nothing unless `main` moved since the last `v*` tag. Otherwise it writes the UTC date
+(`2026.11.19`, no leading zeros — Cargo's semver rejects them) into the `heyl` crate's version,
+turns the pending entries of `CHANGELOG.md` into a `## Release` chapter, and commits that as
+`Release <version>`. The commit is built only from a scratch branch until the whole of CI has
+passed on it and all five wheels have been installed and run through `uvx` on their own
+runners; then `main` is fast-forwarded to it and it is tagged `v<version>` — if `main` moved
+meanwhile the fast-forward is refused and nothing is published. Only after that: PyPI (trusted
+publishing, no token) and the GitHub release. Only `heyl` is versioned; the eight library crates
+stay `0.0.0` until crates.io (M8). The Linux wheels carry the static musl binary and both
+`manylinux` and `musllinux` tags, so one wheel serves glibc and musl distributions alike. No
+sdist is published: a platform outside the five targets gets no match instead of a local compile.
+
+One build feeds the first three. crates.io is the odd one out and
 the only one that imposes constraints on the codebase:
 
 - **`protoc` is not a build-time requirement, and generated code is not committed.**
@@ -1247,6 +1260,10 @@ reaches clap only after `harden_process()` has mlocked and, on Windows, raised t
 quota — before being uploaded as a workflow artifact. Building proves a binary linked; nothing
 proved it starts, and the artifact is the first thing anyone downloading it runs.
 
+**A release is gated by this same file.** `ci.yml` is also a reusable workflow, and the nightly
+release calls it against the release commit before building a single wheel — so nothing reaches
+PyPI that has not passed every job above on the exact commit it was built from.
+
 `fmt` and `clippy` are host-independent and run once, beside the matrix rather than inside it. All five are required checks: a target-specific break — a dependency gated to `cfg(unix)`, say —
 fails the pull request that introduced it rather than being discovered whenever someone next tries
 that platform. That is also the reason `.ship/gates.sh` no longer claims to mirror CI completely;
@@ -1324,8 +1341,8 @@ risk actually concentrates.
 ## 7. Milestones
 
 Sizing is relative effort, not calendar commitment; assume one engineer part-time.
-Milestones are work units, not releases — a version number gets assigned when something is
-actually released.
+Milestones are work units, not releases — versions are dates, assigned by the nightly release
+(§ Distribution channels), whatever milestone `main` happens to be in.
 
 | # | Milestone | Exit criterion | Size |
 |---|---|---|---|
@@ -1354,7 +1371,7 @@ reached has been more useful than mechanically shifting the numbers. What remain
 - ~~**Session registration**~~ — done: `SessionMetadata` write, tombstone on `session remove`,
   `session list`, and the phone-swipe pairing it needs. What is left is the read path using it.
 - **UX completion** — `totp`, `run`, `completion`, output contract, exit codes, error taxonomy.
-- **Distribution** — `cargo-dist` binaries, npm, PyPI.
+- **Distribution** — ~~PyPI, GitHub Releases~~ (nightly, see Distribution channels); npm and a curl installer remain.
 - **Hardening** — zeroization audit, fuzz the vault decoder, threat-model review, crates.io.
 - **FIDO2 login**, **device-to-device unlock**, **Windows support** — independent of one another
   and of the core, which is the intent behind the port boundary.

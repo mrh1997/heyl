@@ -20,6 +20,7 @@ pub mod doctor;
 pub mod error;
 pub mod get;
 pub mod meta_vault;
+mod race;
 pub mod recovery;
 pub mod run;
 pub mod session;
@@ -42,4 +43,6 @@ pub struct Ports<'a> {
     pub clock: &'a dyn heyl_ports::Clock,
     /// Randomness.
     pub random: &'a dyn heyl_ports::RandomSource,
+    /// Where an approval request is shown: a window, a command, or nowhere.
+    pub ui: &'a dyn heyl_ports::ApprovalUi,
 }

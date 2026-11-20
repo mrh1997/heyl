@@ -154,6 +154,7 @@ pub async fn set(
             source: e,
         })?;
         meta.commit(ports).await?;
+        super::remember_display_name(ports, slot, value).await;
         return Ok(());
     }
 

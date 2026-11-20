@@ -336,6 +336,7 @@ physically cannot reach `heyl-platform` or `heyl-proto`, because it does not dep
 | `SecretStore` | store/fetch/delete `access_token`, `session_priv_key` | `keyring` (Secret Service) | `keyring` (Keychain) | `keyring` (Credential Manager) |
 | `Paths` | config / state / runtime directories | `directories` (XDG) | `directories` | `directories` |
 | `Terminal` | TTY detection, hidden input, QR rendering, prompts | termios | termios | Console API |
+| `ApprovalUi` | put an unlock or pairing request in front of the person (§5, *Approval window*) | `sh` + zenity / kdialog | `heyl` re-run as a winit window | `heyl` re-run as a winit window |
 | `FidoDevice` | CTAP2 `hmac-secret` transport (M9) | `ctap-hid-fido2` | `ctap-hid-fido2` | **`WebAuthn.dll`** — HID is not directly claimable |
 | `ProcessRunner` | spawn child with injected environment for `run` | fork/exec | fork/exec | CreateProcess |
 | `HeylApi` | the backend, as ~12 use-case-shaped methods over domain types | `heyl-grpc` (tonic + `heyl-proto`) — identical on every platform |||
@@ -599,7 +600,7 @@ allowed edges:
 | `heyl-proto` | `tonic`, `tonic-web`, `prost`, `prost-types` | any other `heyl-*` |
 | `heyl-grpc` | `heyl-proto`, `heyl-domain`, `heyl-ports`, `tokio`, `hyper`, `rustls` | `heyl-platform`, `heyl-app` |
 | `heyl-platform` | `heyl-ports`, `heyl-domain`, `keyring`, `directories`, `crossterm`, `rpassword`, `qr2term`, `ctap-hid-fido2` | `heyl-app`, `heyl-grpc` |
-| `heyl-cli` | everything — the only crate that wires adapters into the core | — |
+| `heyl-cli` | everything — the only crate that wires adapters into the core; on Windows and macOS also the approval window's `winit`, `softbuffer`, `noto-sans-mono-bitmap` | — |
 
 Three edges do the real work. **`heyl-crypto`, `heyl-domain` and `heyl-vault` cannot reach the
 network**, because they do not depend on a runtime or transport at all — not by convention, but
@@ -633,6 +634,8 @@ endorsement; everything here gets pinned.
 | **Hidden input** | `rpassword` | 7.5 | Recovery code entry without echo; unix, windows, macOS. |
 | **Terminal** | `crossterm` | 0.29 | TTY capabilities. `std::io::IsTerminal` covers plain detection. |
 | **QR** | `qr2term` | 0.3 | Terminal QR (M4). Encoding via `qrcode` if we need control over quiet zone/polarity. |
+| **Approval window** | `winit` + `softbuffer` | 0.30 / 0.4 | Windows and macOS only, default features off: a window and a pixel buffer, nothing drawn for us. Not on Linux — see §5, *Approval window*. |
+| **Window font** | `noto-sans-mono-bitmap` | 0.4 | Noto Sans Mono pre-rasterised into the crate: no font file, no rasteriser, no dependencies. Monospace makes word-wrapping a division. |
 | **TOTP** | `totp-rs` | 6.0 | RFC 6238 (M6). |
 | **Timestamps** | `jiff` | 0.2 | ISO 8601 — see the ordering constraint below. |
 | **JSON** | `serde_json` (`preserve_order`) | 1.x | `preserve_order` is **required**, not optional — see below. |
@@ -872,7 +875,7 @@ exit 1, because you asked for that one.
 - Everything else — prompts, progress, QR codes, warnings — goes to **stderr**.
 - Secrets never appear in logs, errors, or `--format json` unless explicitly requested.
 
-**`--format <human|json|json-pretty>` is global**, beside `--session`, `--wait` and `--qr`: a
+**`--format <human|json|json-pretty>` is global**, beside `--session`, `--wait`, `--qr` and `--ui`: a
 wrapper sets it once and everything it drives answers in kind. `json` is **one compact document
 per line**; `json-pretty` is the same documents indented. Under either, the prose report is *not*
 also printed — a document is the machine's rendering of it, and saying it twice on two streams
@@ -898,7 +901,7 @@ code, and the table has one entry per class a caller acts on differently rather 
 | 1 | generic failure — crypto, a vault, local state that makes no sense |
 | 2 | not found — an unknown slot or setting; a vault, login or field a selector did not match |
 | 3 | *(reserved and unused — `get` resolves ambiguity rather than refusing it)* |
-| 4 | unlock required / expired |
+| 4 | unlock required / expired, or cancelled in the approval window |
 | 5 | network or backend error |
 | 6 | conflict — the slot already exists |
 | 7 | invalid — a value the command cannot take |
@@ -1086,6 +1089,53 @@ shared vault cannot *override* one of your own variables — but it can still *a
 of code-loading variable names would close the obvious cases and is left open: any such list is
 incomplete by construction.
 
+### Approval window
+
+Every wait on a person — the unlock behind `get`, `run` and `session unlock`, and the pairing in
+`session create` — puts the request **in a window** as well as on stderr. heyl is increasingly run
+by a script or an agent whose terminal nobody watches, and a phone notification alone does not say
+which of several sessions is asking. The window is centred and always on top, names the session by
+the display name the phone shows (`heyl CLI requests passwords` / `Approve in your heylogin app`),
+and **vanishes the moment the phone approves**. That name is vault content, unreadable while the
+session waits for its unlock, so the keychain keeps a copy of it (`display_name`), written by
+`session create` and `session set display-name`; without one the window uses the slot's default. Its Cancel button (or closing it, or Escape) aborts with exit 4.
+
+- `--ui window|terminal` (`HEYL_UI`) — `terminal` is the old behaviour. A machine where no window
+  can open (SSH, no display) falls back to the terminal silently, and draws the pairing code there.
+- `--ui-cmd <command>` (`HEYL_UI_CMD`) replaces the window **for unlocks only**. A pairing code is
+  not handed to a program heyl did not write; `session create` always uses the built-in window.
+- `--ui-shell sh|cmd|powershell|pwsh` (`HEYL_UI_SHELL`) — default `sh` on Unix; on Windows `cmd`,
+  or `powershell` when the command names a `.ps1`. PowerShell runs with no profile.
+
+**The protocol** is the same for a `--ui-cmd` and for the built-in window, which is simply the
+default command:
+
+- *in* — `HEYL_UI_SESSION`, `HEYL_UI_HEADING` (unlocks) and `HEYL_UI_MESSAGE` in the environment. Every other `HEYL_*`
+  variable is **removed** from it: the headless store's credentials live there.
+- *done* — heyl writes one line, `approved`, `timeout` or `failed`, and closes stdin. The process
+  takes its UI down on end of input.
+- *cancel* — the process prints `cancel` on stdout; heyl stops waiting.
+- *safety net* — still running 5 s after stdin closed, its whole process tree is terminated
+  (`taskkill /T` on Windows, the process group on Unix). An early exit is **not** a cancel, so a
+  notifier that pops a message and returns is a valid command. heyl waits out that grace before
+  it exits, so a command cleaning up is not cut short.
+- The built-in window also prints `shown` once it is on screen; a pairing waits up to 3 s for it
+  to decide whether the terminal must draw the code too.
+
+**Why a separate process.** macOS wants a UI on the main thread, which heyl's runtime occupies;
+and a GUI stack loads input methods and accessibility hooks that have no business in the process
+holding the seed. On Windows and macOS the window is `heyl __approval-window <unlock|pair>` — the
+same binary, recognised before argument parsing, before hardening and before the runtime starts.
+
+**Why Linux is a shell script.** Every Rust Wayland stack forces the system `libwayland` (winit
+and softbuffer both enable `wayland-backend/client_system`), which a static musl binary can
+neither link nor `dlopen`; the pure-Rust backend pulls `cc` as a build dependency, which §4's ban
+excludes. So on Linux the window is an embedded POSIX `sh` script that drives **zenity** — present
+on GNOME, Xfce, Cinnamon and MATE — or **kdialog** on KDE, and exits 3 ("no window") when it has
+neither or no display. The pairing code is drawn in it as monospace half-blocks, forced black on
+white so a dark theme cannot invert it. Wayland gives no client control over placement or
+stacking, so on Linux "centred, on top" is whatever the desktop does with a dialog.
+
 ### QR rendering, and the SAS alternative (M4)
 
 QR is needed by exactly one flow — phone-swipe login. FIDO2 (M9) and device-to-device unlock (M10)
@@ -1123,6 +1173,8 @@ Behaviour, implemented behind the `Terminal` port:
   with non-square cells or ligatures.
 - Under `--format json` the URL is also a document on stdout, which is what makes pairing
   drivable by something other than a person reading a terminal.
+- When the approval window shows the code (§5, *Approval window*), the terminal does not draw it
+  a second time — it says the code is in a window, and still prints the URL.
 
 Two failure modes to get right, because both fail *silently* — the code renders, looks correct,
 and simply will not scan:

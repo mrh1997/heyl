@@ -32,6 +32,14 @@ pub enum StoredSecret {
     /// ourselves, setting our timeout and writing our own `SessionMetadata`
     /// entry all address the session by id.
     SessionId,
+    /// What the phone calls this session, as last written by this machine.
+    ///
+    /// **Not a secret, and only a copy**: the real name is vault content, which
+    /// cannot be read while the session waits to be unlocked — exactly when the
+    /// approval window wants to show it. Absent for slots made before it
+    /// existed, and for a rename done in the heylogin app; the window then
+    /// falls back to the slot's default name.
+    DisplayName,
 }
 
 impl StoredSecret {
@@ -51,6 +59,7 @@ impl StoredSecret {
             Self::SessionPrivateKey => "session_priv_key",
             Self::SessionId => "session_id",
             Self::SlotIndex => "slots",
+            Self::DisplayName => "display_name",
         }
     }
 }

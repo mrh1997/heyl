@@ -20,6 +20,7 @@
 //! trip, so the ports box and `heyl-app` holds `&dyn`.
 
 pub mod api;
+pub mod approval;
 pub mod clock;
 pub mod error;
 pub mod random;
@@ -27,6 +28,7 @@ pub mod secret_store;
 pub mod terminal;
 
 pub use api::{HeylApi, LongPollChallenge, SessionUnlockGrant, SessionUpdate};
+pub use approval::{ApprovalOutcome, ApprovalPrompt, ApprovalRequest, ApprovalUi};
 pub use clock::Clock;
 pub use error::{ApiError, PortError};
 pub use random::RandomSource;

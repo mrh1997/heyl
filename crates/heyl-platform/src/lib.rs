@@ -11,6 +11,7 @@
 //! needed only by `CreateChallenge` at login time. Nothing through M5 has a use
 //! for a state directory, so the five platform ports may turn out to be four.
 
+pub mod approval_ui;
 pub mod child;
 pub mod clock;
 pub mod headless;
@@ -22,6 +23,7 @@ pub mod terminal;
 #[cfg(feature = "test-ports")]
 pub mod test_state;
 
+pub use approval_ui::{ApprovalConfig, NoApprovalUi, ProcessApprovalUi, Shell};
 pub use clock::SystemClock;
 pub use headless::HeadlessSecretStore;
 pub use keychain::KeyringStore;

@@ -1,5 +1,10 @@
 # Changelog
 
+- Waiting for your phone now opens a small window on top of your other windows (`get`, `run`,
+  `session unlock`, and the pairing QR code for `session create`), saying "<display name> requests
+  passwords" for unlocks. It disappears once you approve,
+  and Cancel aborts. On Linux it uses zenity or kdialog. `--ui terminal` turns it off, and
+  `--ui-cmd` runs your own command instead for unlock requests.
 - Nightly releases: when `main` has new commits, a 02:00 UTC run tags a date-versioned release
   commit and publishes it to PyPI (`uvx heyl ...`) and to GitHub Releases, for Linux, macOS
   (Apple Silicon) and Windows on x86_64 and ARM64.

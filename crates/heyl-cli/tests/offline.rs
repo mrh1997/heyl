@@ -53,6 +53,7 @@ async fn a_declined_prompt_does_not_reach_create_tokens() {
             terminal: &terminal,
             clock: &clock,
             random: &random,
+            ui: &heyl_platform::NoApprovalUi,
         },
         "fixture@example.com",
         Confirmation::Ask("Disconnect and recover? [y/N] "),

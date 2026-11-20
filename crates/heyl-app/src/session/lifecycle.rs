@@ -2,13 +2,13 @@
 
 use heyl_crypto::Seed;
 use heyl_domain::{AuthenticatorKeys, SessionId, SessionPolicy, Timestamp};
-use heyl_ports::{QrStyle, StoredSecret};
+use heyl_ports::{ApprovalOutcome, ApprovalRequest, QrStyle, StoredSecret};
 
 use super::{
-    SESSION_TYPE, Slot, adopt, exists, forget, index_add, index_remove, metadata, pair_url,
-    respond, self_grant, show_pairing, write_policy,
+    SESSION_TYPE, Slot, adopt, display_name, exists, forget, index_add, index_remove, metadata,
+    pair_url, remember_display_name, respond, self_grant, show_pairing, write_policy,
 };
-use crate::{AppError, Ports, meta_vault, unlock::Unlocked};
+use crate::{AppError, Ports, meta_vault, race::until_cancelled, unlock::Unlocked};
 
 /// What `CreateLongPollChannelChallenge` is keyed by: the base64 of a SHA-512
 /// truncated to 32 bytes, over the public key the QR carries.
@@ -78,14 +78,28 @@ pub async fn create(
     let public = pairing_key.public_key();
 
     let url = pair_url(&public);
-    show_pairing(ports, &url, style);
+    let prompt = show_pairing(ports, slot, &url, style).await;
     announce(&url);
 
     let hash = pairing_hash(&public);
 
-    // Long-polls: this does not return until the phone answers.
+    // Long-polls: this does not return until the phone answers — or the
+    // person cancels in the window, which drops the poll.
     ports.terminal.note("waiting for the swipe…");
-    let challenge = ports.api.create_long_poll_channel_challenge(&hash).await?;
+    let challenge = until_cancelled(
+        async {
+            ports
+                .api
+                .create_long_poll_channel_challenge(&hash)
+                .await
+                .map_err(AppError::Api)
+        },
+        prompt.cancelled(),
+    )
+    .await;
+    // The window goes the moment the swipe arrives: what follows is ours.
+    prompt.close(outcome_of(&challenge)).await;
+    let challenge = challenge?;
 
     let plaintext = pairing_key
         .open(&challenge.encrypted_secret)
@@ -146,6 +160,7 @@ pub async fn create(
         tokens.session_id,
     )
     .await?;
+    remember_display_name(ports, slot, &display).await;
 
     write_policy(ports, tokens.session_id, policy, "").await?;
     index_add(ports, slot).await?;
@@ -268,7 +283,40 @@ pub async fn unlock_and_wait(
         .terminal
         .note(&format!("approve on your phone ({})…", slot.name()));
 
-    poll_for_unlock(ports, adopted.session_id, timeout_secs).await
+    let heading = unlock_heading(&display_name(ports, slot).await);
+    let prompt = ports
+        .ui
+        .show(ApprovalRequest::Unlock {
+            session: slot.name(),
+            heading: &heading,
+            message: UNLOCK_MESSAGE,
+        })
+        .await;
+    let result = until_cancelled(
+        poll_for_unlock(ports, adopted.session_id, timeout_secs),
+        prompt.cancelled(),
+    )
+    .await;
+    prompt.close(outcome_of(&result)).await;
+    result
+}
+
+/// The approval window's heading while an unlock waits: who is asking, by the
+/// name the phone shows.
+fn unlock_heading(display: &str) -> String {
+    format!("{display} requests passwords")
+}
+
+/// The approval window's body while an unlock waits.
+const UNLOCK_MESSAGE: &str = "Approve in your heylogin app";
+
+/// What a prompt is told as a wait ends.
+fn outcome_of<T>(result: &Result<T, AppError>) -> ApprovalOutcome {
+    match result {
+        Ok(_) => ApprovalOutcome::Approved,
+        Err(AppError::UnlockRequired) => ApprovalOutcome::Timeout,
+        Err(_) => ApprovalOutcome::Failed,
+    }
 }
 
 /// Poll `Sync` until the grant appears.
@@ -452,4 +500,27 @@ async fn store(
         .set(&slot.key(secret), value)
         .await
         .map_err(AppError::Port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_unlock_heading_names_the_session_as_the_phone_does() {
+        assert_eq!(unlock_heading("heyl CLI"), "heyl CLI requests passwords");
+    }
+
+    #[test]
+    fn a_prompt_is_told_how_the_wait_ended() {
+        assert_eq!(outcome_of(&Ok(())), ApprovalOutcome::Approved);
+        assert_eq!(
+            outcome_of::<()>(&Err(AppError::UnlockRequired)),
+            ApprovalOutcome::Timeout
+        );
+        assert_eq!(
+            outcome_of::<()>(&Err(AppError::Cancelled)),
+            ApprovalOutcome::Failed
+        );
+    }
 }

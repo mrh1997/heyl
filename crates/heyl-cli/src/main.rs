@@ -8,6 +8,8 @@
 #[cfg(feature = "dev")]
 mod api;
 mod output;
+#[cfg(not(target_os = "linux"))]
+mod window;
 mod wiring;
 
 use std::sync::LazyLock;
@@ -78,6 +80,69 @@ struct Cli {
     /// every document at M6; until then a shape may change.
     #[arg(long, global = true, value_enum, default_value_t = output::Format::Human)]
     format: output::Format,
+
+    /// Where to ask for a phone approval.
+    ///
+    /// `window` puts a small window in front of everything — centred, on top
+    /// — that vanishes when the phone approves; its Cancel button aborts with
+    /// exit code 4. For when heyl runs under a script or an agent and nobody
+    /// is watching its terminal. The terminal note is printed either way, and
+    /// a machine with no display falls back to it silently. On Linux the
+    /// window is zenity, or kdialog on KDE (Wayland and X11 alike).
+    #[arg(long, global = true, value_enum, env = "HEYL_UI", default_value_t = UiMode::Window)]
+    ui: UiMode,
+
+    /// Run this command to ask for an unlock approval, instead of the window.
+    ///
+    /// It gets `HEYL_UI_SESSION`, `HEYL_UI_HEADING` and `HEYL_UI_MESSAGE` in
+    /// its environment.
+    /// When the wait is over heyl writes one line to its stdin — `approved`,
+    /// `timeout` or `failed` — and closes it: take your UI down then. Print
+    /// `cancel` on stdout to abort the wait (exit code 4). Still running 5 s
+    /// after its stdin closed, it is terminated with everything it started.
+    /// Pairing (`session create`) never uses it.
+    #[arg(long, global = true, env = "HEYL_UI_CMD", value_name = "COMMAND")]
+    ui_cmd: Option<String>,
+
+    /// The shell `--ui-cmd` runs in.
+    ///
+    /// Default: `sh` on Linux and macOS; on Windows `cmd`, or `powershell`
+    /// when the command names a `.ps1` script.
+    #[arg(long, global = true, value_enum, env = "HEYL_UI_SHELL")]
+    ui_shell: Option<UiShell>,
+}
+
+/// `--ui`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum UiMode {
+    /// A window, falling back to the terminal.
+    Window,
+    /// The terminal only.
+    Terminal,
+}
+
+/// `--ui-shell`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum UiShell {
+    /// `sh -c`.
+    Sh,
+    /// `cmd /C` (Windows).
+    Cmd,
+    /// Windows `PowerShell` 5.1, no profile.
+    Powershell,
+    /// `PowerShell` 7, no profile.
+    Pwsh,
+}
+
+impl From<UiShell> for heyl_platform::Shell {
+    fn from(value: UiShell) -> Self {
+        match value {
+            UiShell::Sh => Self::Sh,
+            UiShell::Cmd => Self::Cmd,
+            UiShell::Powershell => Self::PowerShell,
+            UiShell::Pwsh => Self::Pwsh,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -330,6 +395,17 @@ enum SessionCommand {
 }
 
 fn main() -> std::process::ExitCode {
+    // The approval window is this binary run again (`heyl_platform::approval_ui`).
+    // Recognised before clap, so it is no subcommand anyone sees, and before
+    // the hardening and the runtime, which a window holding no secret needs
+    // neither of.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new(heyl_platform::approval_ui::WINDOW_ARG))
+    {
+        let kind = args.next().unwrap_or_default();
+        return approval_window(&kind.to_string_lossy());
+    }
+
     // Before anything can reach for a secret: no core dumps, and memory
     // locking must actually work. Failing here is deliberate -- see
     // `heyl_platform::process`.
@@ -360,8 +436,33 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn approval_window(kind: &str) -> std::process::ExitCode {
+    window::run(kind)
+}
+
+/// Linux's window is a script; this binary has none to show.
+#[cfg(target_os = "linux")]
+fn approval_window(_kind: &str) -> std::process::ExitCode {
+    std::process::ExitCode::from(3)
+}
+
 async fn run(cli: Cli) -> Result<std::process::ExitCode, AppError> {
-    let adapters = wiring::Adapters::new()?;
+    let adapters = wiring::Adapters::new(heyl_platform::ApprovalConfig {
+        window: cli.ui == UiMode::Window,
+        command: cli.ui_cmd.clone().filter(|c| !c.trim().is_empty()),
+        shell: cli.ui_shell.map(Into::into),
+    })?;
+    let result = dispatch(cli, &adapters).await;
+    // A `--ui-cmd` gets its grace period even when heyl is done first.
+    adapters.settle().await;
+    result
+}
+
+async fn dispatch(
+    cli: Cli,
+    adapters: &wiring::Adapters,
+) -> Result<std::process::ExitCode, AppError> {
     let ports = adapters.ports();
     let slot = Slot::new(cli.session.as_deref());
 

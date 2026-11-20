@@ -62,6 +62,17 @@ HEYL_SESSION=claude-code heyl get -l github.com # your phone: "approve claude-co
 The name on that approval screen is the **only** thing your phone shows about who is asking —
 which is why sessions are named for their callers.
 
+When heyl has to wait for your phone, it also opens a small window in front of everything, naming
+the session as your phone shows it ("heyl CLI requests passwords"). The window disappears once you approve; its Cancel button aborts.
+That way an agent's request doesn't go unnoticed in a terminal nobody is watching. On Linux the
+window is zenity, or kdialog on KDE. `--ui terminal` turns it off. `--ui-cmd` runs your own command
+instead (unlocks only): it gets `HEYL_UI_SESSION` / `HEYL_UI_HEADING` / `HEYL_UI_MESSAGE`, is told `approved` / `timeout`
+/ `failed` on stdin as the wait ends, and can print `cancel` to abort:
+
+```sh
+HEYL_UI_CMD='notify-send "$HEYL_UI_HEADING" "$HEYL_UI_MESSAGE"' heyl get -l github.com
+```
+
 `heyl session create` is how you sign in. There is no `heyl login` yet, and no unattended one at
 all — see below.
 

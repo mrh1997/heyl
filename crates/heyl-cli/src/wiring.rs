@@ -2,7 +2,10 @@
 
 use heyl_app::{AppError, Ports};
 use heyl_grpc::{DomainApi, GrpcClient, GrpcConfig};
-use heyl_platform::{HeadlessSecretStore, KeyringStore, OsRandom, SystemClock, SystemTerminal};
+use heyl_platform::{
+    ApprovalConfig, HeadlessSecretStore, KeyringStore, OsRandom, ProcessApprovalUi, SystemClock,
+    SystemTerminal,
+};
 use heyl_ports::SecretStore;
 #[cfg(feature = "dev")]
 use {heyl_app::recovery::CodeSource, zeroize::Zeroizing};
@@ -14,6 +17,7 @@ pub struct Adapters {
     terminal: SystemTerminal,
     clock: SystemClock,
     random: OsRandom,
+    ui: ProcessApprovalUi,
 
     /// The keychain and draw sequence a scenario supplied, when one did.
     ///
@@ -29,7 +33,7 @@ impl Adapters {
     ///
     /// # Errors
     /// [`AppError::Api`] if the TLS stack cannot be initialised.
-    pub fn new() -> Result<Self, AppError> {
+    pub fn new(ui: ApprovalConfig) -> Result<Self, AppError> {
         let config = GrpcConfig {
             endpoint: endpoint(),
             ..GrpcConfig::default()
@@ -56,6 +60,7 @@ impl Adapters {
             terminal: SystemTerminal,
             clock: SystemClock,
             random: OsRandom,
+            ui: ProcessApprovalUi::new(ui),
 
             // Present only in a build made with `--features dev`, which is
             // what keeps a writable on-disk credential store out of every
@@ -82,6 +87,9 @@ impl Adapters {
                 } else {
                     &self.random
                 },
+                // A scenario replays traffic; a window would wait on a person
+                // who is not there, and change nothing it records.
+                ui: &heyl_platform::NoApprovalUi,
             };
         }
 
@@ -91,7 +99,13 @@ impl Adapters {
             terminal: &self.terminal,
             clock: &self.clock,
             random: &self.random,
+            ui: &self.ui,
         }
+    }
+
+    /// Let closed approval prompts finish leaving (`ProcessApprovalUi::settle`).
+    pub async fn settle(&self) {
+        self.ui.settle().await;
     }
 }
 

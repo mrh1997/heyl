@@ -70,3 +70,13 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 tokio       = { workspace = true }
 zeroize     = { workspace = true }
+
+# The approval window (`src/window.rs`). Windows and macOS only: on Linux the
+# window is a shell script driving zenity or kdialog (heyl-platform), because
+# every Rust Wayland stack links the system libwayland or builds C, and the
+# Linux binary is static musl with a pure-Rust graph (DESIGN.md §4).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+winit                 = { workspace = true }
+softbuffer            = { workspace = true }
+noto-sans-mono-bitmap = { workspace = true }
+qrcode                = { workspace = true }

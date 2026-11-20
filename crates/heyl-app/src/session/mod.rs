@@ -193,7 +193,33 @@ pub async fn forget(ports: &Ports<'_>, slot: &Slot) -> Result<(), AppError> {
     for secret in StoredSecret::ALL {
         ports.store.delete(&slot.key(secret)).await?;
     }
+    ports
+        .store
+        .delete(&slot.key(StoredSecret::DisplayName))
+        .await?;
     Ok(())
+}
+
+/// What the phone calls this slot, without unlocking.
+///
+/// The keychain copy if there is one, else the name heyl would have chosen.
+pub async fn display_name(ports: &Ports<'_>, slot: &Slot) -> String {
+    ports
+        .store
+        .get(&slot.key(StoredSecret::DisplayName))
+        .await
+        .map_or_else(|_| slot.default_display(), |name| name.to_string())
+}
+
+/// Remember the display name just written to the vault.
+///
+/// Best effort: the copy only labels the approval window, and a keychain that
+/// refuses it (headless mode) must not fail a write that already succeeded.
+async fn remember_display_name(ports: &Ports<'_>, slot: &Slot, name: &str) {
+    let _ = ports
+        .store
+        .set(&slot.key(StoredSecret::DisplayName), name)
+        .await;
 }
 
 /// Build the entry this session publishes about itself.
@@ -307,13 +333,30 @@ fn pair_url(public: &heyl_crypto::EncryptionPublicKey) -> String {
 /// The URL is the difference between a recoverable and an unrecoverable
 /// attempt: a code can fail to scan for reasons nobody can see — polarity,
 /// cell aspect, a font that substitutes the block glyphs (DESIGN.md §5).
-fn show_pairing(ports: &Ports<'_>, url: &str, style: QrStyle) {
+async fn show_pairing(
+    ports: &Ports<'_>,
+    slot: &Slot,
+    url: &str,
+    style: QrStyle,
+) -> Box<dyn heyl_ports::ApprovalPrompt> {
     ports.terminal.note("scan this with the heylogin app:");
-    let drawn = ports.terminal.render_qr(url, style);
-    if !drawn {
+    let prompt = ports
+        .ui
+        .show(heyl_ports::ApprovalRequest::Pair {
+            session: slot.name(),
+            url,
+            style,
+        })
+        .await;
+    // The terminal draws the code only when no window does: two codes on
+    // screen is one too many to point a phone at.
+    if prompt.is_shown() {
+        ports.terminal.note("(the code is shown in a window)");
+    } else if !ports.terminal.render_qr(url, style) {
         ports.terminal.note("(no terminal to draw on)");
     }
     ports.terminal.note(url);
+    prompt
 }
 
 #[cfg(test)]
@@ -500,6 +543,7 @@ mod tests {
             terminal: &NoTerminal,
             clock: &NoClock,
             random: &NoRandom,
+            ui: &NoUi,
         }
     }
 
@@ -508,6 +552,17 @@ mod tests {
     struct NoTerminal;
     struct NoClock;
     struct NoRandom;
+    struct NoUi;
+
+    #[async_trait::async_trait]
+    impl heyl_ports::ApprovalUi for NoUi {
+        async fn show(
+            &self,
+            _request: heyl_ports::ApprovalRequest<'_>,
+        ) -> Box<dyn heyl_ports::ApprovalPrompt> {
+            unreachable!("these tests touch only the keychain")
+        }
+    }
 
     macro_rules! unreachable_port {
         ($($tt:tt)*) => {

@@ -52,6 +52,10 @@ pub enum AppError {
     #[error("this session is locked; run `heyl login` again")]
     UnlockRequired,
 
+    /// The person cancelled in the approval window (or `--ui-cmd` said so).
+    #[error("cancelled: the request was not approved")]
+    Cancelled,
+
     /// A slot already has credentials.
     #[error("session slot {slot:?} already exists; `heyl session remove {slot}` first")]
     SlotExists {
@@ -263,7 +267,11 @@ impl AppError {
             // A locked session and an unapproved request are the same exit:
             // heyl cannot tell a phone-lock from an idle timeout, and says so
             // rather than guessing (decision 16).
-            Self::UnlockRequired | Self::NotRegistered { .. } => ExitCode::UnlockRequired,
+            // Cancelling the approval window is declining the approval
+            // yourself: the same "not unlocked" a caller already handles.
+            Self::UnlockRequired | Self::NotRegistered { .. } | Self::Cancelled => {
+                ExitCode::UnlockRequired
+            }
             // A rejected token is the one case that is *not* "locked": the
             // session is gone, and swiping again will not bring it back.
             Self::SessionGone | Self::Api(_) => ExitCode::Backend,

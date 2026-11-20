@@ -24,8 +24,10 @@ heyl-ports  = { workspace = true }
 
 async-trait = { workspace = true }
 # `process` and `signal` are `heyl run`'s: spawning the child, and ignoring
-# the interrupt that belongs to it while it runs (`child.rs`).
-tokio       = { workspace = true, features = ["time", "process", "signal"] }
+# the interrupt that belongs to it while it runs (`child.rs`). `sync` and
+# `io-util` are the approval window's: its protocol over the child's streams
+# (`approval_ui.rs`).
+tokio       = { workspace = true, features = ["time", "process", "signal", "sync", "io-util"] }
 qrcode      = { workspace = true }
 jiff        = { workspace = true }
 keyring     = { workspace = true }
@@ -48,3 +50,7 @@ serde_json  = { workspace = true, optional = true }
 # matrix in .github/workflows/ci.yml started building those targets.
 [target.'cfg(unix)'.dependencies]
 rlimit      = { workspace = true }
+
+[dev-dependencies]
+# The approval protocol's tests drive real shells (`tests/approval_ui.rs`).
+tokio       = { workspace = true, features = ["rt", "macros", "time", "process"] }

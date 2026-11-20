@@ -72,6 +72,17 @@ impl SystemTerminal {
     }
 }
 
+/// A pairing code as text: Unicode half-blocks, quiet zone included.
+///
+/// Dark modules are the *foreground*, so it scans when drawn dark on light —
+/// which a caller rendering it elsewhere (the Linux approval window) has to
+/// arrange. `None` if the payload does not fit a QR code.
+#[must_use]
+pub fn qr_text(payload: &str) -> Option<String> {
+    let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
+    Some(SystemTerminal::draw(&code, QrStyle::Utf8))
+}
+
 impl Terminal for SystemTerminal {
     fn is_interactive(&self) -> bool {
         std::io::stdin().is_terminal()

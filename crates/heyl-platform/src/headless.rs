@@ -27,6 +27,7 @@ impl HeadlessSecretStore {
             StoredSecret::SessionPrivateKey => "HEYL_SESSION_KEY",
             StoredSecret::SessionId => "HEYL_SESSION_ID",
             StoredSecret::SlotIndex => "HEYL_SLOTS",
+            StoredSecret::DisplayName => "HEYL_DISPLAY_NAME",
         }
     }
 

@@ -157,20 +157,33 @@ pub enum AppError {
         reason: &'static str,
     },
 
-    /// No live login carries the project's prefix.
+    /// No live login has the project URL as its name, title or website.
     ///
     /// Names nothing beyond what the caller typed, like every miss.
-    #[error("no login belongs to this project")]
+    #[error("no login matches this project")]
     NoProjectSecrets,
 
-    /// A login's name yields something after the `#` that is not a portable
-    /// environment variable name. Names the login by id, never by value.
+    /// A custom field of the project's login is named something that is not a
+    /// portable environment variable name. Field names are not secret; the
+    /// value is never shown.
     #[error(
-        "login {login} does not name a valid environment variable after the #;          expected letters, digits and _, not starting with a digit"
+        "login {login} has a custom field named {name:?}, which is not a valid environment variable name; expected letters, digits and _, not starting with a digit"
     )]
     InvalidVariableName {
-        /// The offending login.
+        /// The project's login.
         login: heyl_domain::LoginId,
+        /// The offending field name.
+        name: String,
+    },
+
+    /// The project's login has two custom fields with the same name, so the
+    /// variable's value would be ambiguous.
+    #[error("login {login} has more than one custom field named {name:?}")]
+    DuplicateVariable {
+        /// The project's login.
+        login: heyl_domain::LoginId,
+        /// The repeated field name.
+        name: String,
     },
 
     /// A protected value's ciphertext was not valid base64.
@@ -302,6 +315,7 @@ impl AppError {
             | Self::MissingLoginSelector
             | Self::BadProject { .. }
             | Self::InvalidVariableName { .. }
+            | Self::DuplicateVariable { .. }
             | Self::NotConfirmed => ExitCode::Invalid,
 
             _ => ExitCode::Failure,

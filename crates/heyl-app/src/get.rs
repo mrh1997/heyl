@@ -586,7 +586,7 @@ fn builtin(
 }
 
 /// A custom field's value, decrypted if it was protected.
-fn resolve(value: &FieldValue, protected: &ProtectedSecret) -> Result<String, AppError> {
+pub(crate) fn resolve(value: &FieldValue, protected: &ProtectedSecret) -> Result<String, AppError> {
     match value {
         FieldValue::Plain(s) => Ok(s.clone()),
         FieldValue::Protected(p) => decrypt(protected, p),

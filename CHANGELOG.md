@@ -1,5 +1,8 @@
 # Changelog
 
+- `heyl run --project <url>` now reads a single login — the one whose address is the project
+  URL — and puts each of its custom fields into the command's environment (field name = variable
+  name). The old `<project>#VARIABLE` login naming no longer works.
 - Waiting for your phone now opens a small window on top of your other windows (`get`, `run`,
   `session unlock`, and the pairing QR code for `session create`), saying "<display name> requests
   passwords" for unlocks. It disappears once you approve,

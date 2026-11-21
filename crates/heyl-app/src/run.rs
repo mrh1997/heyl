@@ -1,73 +1,90 @@
-//! `heyl run` — a project's secrets, by naming convention.
+//! `heyl run` — a project's secrets, from one login's custom fields.
 //!
-//! There is no template file. A project is written like a web page without a
-//! scheme, e.g. `github.com/mrh1997/heyl/prod`; every live login whose name starts
-//! with it followed by `#` contributes one environment variable — the
-//! part of the name after the `#` is the variable, the login's password its
-//! value. DESIGN.md §5 (`run`) holds every rule; this module resolves the
-//! variables, and `heyl-cli` spawns the child with them.
+//! There is no template file. A project is one login: `--project` is its URL,
+//! e.g. `github.com/mrh1997/heyl/prod`, matched against the login's name, title
+//! or websites the way `get -l` matches (exact, case-insensitive), with a
+//! leading `https://` or `http://` on either side ignored. Each of that
+//! login's **custom fields** becomes one environment variable — the field's
+//! name is the variable, its value the secret. DESIGN.md §5 (`run`) holds
+//! every rule; this module resolves the variables, and `heyl-cli` spawns the
+//! child with them.
 //!
 //! Secrets leave as [`Zeroizing`] strings: the CLI copies them into the child's
 //! environment and drops them, which is as far as a process can carry them.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-use heyl_domain::{ProtectedSecret, VaultType};
-use heyl_vault::login::{Liveness, Login};
+use heyl_domain::{LoginId, VaultType};
+use heyl_vault::login::{FieldValue, Liveness, Login};
 use zeroize::Zeroizing;
 
-use crate::get::{self, VaultSelector};
+use crate::get::{self, Candidate, VaultSelector};
 use crate::{AppError, Ports};
 
-/// A validated `--project` value, and the prefix it searches for.
+/// A validated `--project` value: the project login's URL.
 #[derive(Debug, Clone)]
 pub struct Project {
-    prefix: String,
+    /// The URL as typed, for messages.
+    url: String,
+    /// Scheme-stripped and lower-cased, for matching.
+    key: String,
 }
 
 impl Project {
     /// Validate a `--project` value.
     ///
     /// # Errors
-    /// [`AppError::BadProject`] (exit 7) if it is empty, has a scheme such as
-    /// `heyl://` (project logins are named like a web page without one, so it
-    /// could never match), ends in `/`, or contains a `#` — the separator heyl
-    /// appends, so one inside would make the prefix ambiguous.
+    /// [`AppError::BadProject`] (exit 7) if it is empty, or nothing but a scheme.
     pub fn parse(project: &str) -> Result<Self, AppError> {
-        let reason = if project.is_empty() {
-            Some("it is empty")
-        } else if project.contains("://") {
-            Some("it must not have a scheme; write it like github.com/owner/repo")
-        } else if project.ends_with('/') {
-            Some("it must not end with /")
-        } else if project.contains('#') {
-            Some("it must not contain #")
-        } else {
-            None
-        };
-        match reason {
-            Some(reason) => Err(AppError::BadProject { reason }),
-            None => Ok(Self {
-                prefix: format!("{project}#"),
-            }),
+        let key = match_key(project.trim());
+        if key.is_empty() {
+            return Err(AppError::BadProject {
+                reason: "it is empty",
+            });
         }
+        Ok(Self {
+            url: project.to_owned(),
+            key,
+        })
     }
 
-    /// The prefix a login's name must start with: the project and a `#`.
+    /// The URL as typed.
     #[must_use]
-    pub fn prefix(&self) -> &str {
-        &self.prefix
+    pub fn url(&self) -> &str {
+        &self.url
     }
+
+    /// Whether a login is this project's: its name, title or one of its
+    /// websites equals the project URL, ignoring case and a leading
+    /// `https://`/`http://` on either side.
+    #[must_use]
+    pub fn matches(&self, login: &Login) -> bool {
+        login
+            .display_headline
+            .as_deref()
+            .into_iter()
+            .chain(std::iter::once(login.title.as_str()))
+            .chain(login.websites.iter().map(String::as_str))
+            .any(|name| match_key(name) == self.key)
+    }
+}
+
+/// A URL reduced to what matching compares: no web scheme, lower case.
+fn match_key(url: &str) -> String {
+    let lower = url.to_lowercase();
+    lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower)
+        .to_owned()
 }
 
 /// One environment variable for the child.
 pub struct Variable {
-    /// Its name — the part of the login's name after the `#`.
+    /// Its name — the custom field's name.
     pub name: String,
-    /// The login's password.
+    /// The custom field's value, decrypted.
     pub value: Zeroizing<String>,
-    /// How many live logins yielded this name; above 1, the ranking chose.
-    pub candidates: usize,
 }
 
 impl std::fmt::Debug for Variable {
@@ -76,35 +93,45 @@ impl std::fmt::Debug for Variable {
         f.debug_struct("Variable")
             .field("name", &self.name)
             .field("value", &"<redacted>")
-            .field("candidates", &self.candidates)
             .finish()
     }
+}
+
+/// What `run` resolved, for the CLI to report on and inject.
+#[derive(Debug)]
+pub struct Resolved {
+    /// The login whose custom fields were used.
+    pub login: LoginId,
+    /// How many live logins matched the project; above 1, the ranking chose.
+    pub match_count: usize,
+    /// The variables, sorted by name. Empty if the login has no custom fields.
+    pub variables: Vec<Variable>,
 }
 
 /// Resolve a project's variables.
 ///
 /// Unlocks like every read, asking the phone and waiting if needed (bounded by
-/// `wait`). The result is sorted by variable name.
+/// `wait`).
 ///
 /// # Errors
-/// [`AppError::NoProjectSecrets`] (exit 2) when no login carries the prefix;
-/// [`AppError::InvalidVariableName`] (exit 7) when one yields a name that is
-/// not a portable environment variable; [`AppError::NoSuchVault`] and the
-/// vault-open errors for a named vault; the usual unlock and backend errors.
+/// [`AppError::NoProjectSecrets`] (exit 2) when no live login matches;
+/// [`AppError::InvalidVariableName`] / [`AppError::DuplicateVariable`] (exit 7)
+/// when a custom field cannot become a variable; [`AppError::NoSuchVault`] and
+/// the vault-open errors for a named vault; the usual unlock and backend errors.
 pub async fn run(
     ports: &Ports<'_>,
     slot: &crate::session::Slot,
     project: &Project,
     vault: &VaultSelector,
     wait: Option<u64>,
-) -> Result<Vec<Variable>, AppError> {
+) -> Result<Resolved, AppError> {
     let session = crate::unlock::ensure(ports, slot, wait).await?;
     let scope = get::resolve_scope(ports, &session, vault).await?;
     let named = !matches!(vault, VaultSelector::Any);
 
-    let mut found: Vec<Found<ProtectedSecret>> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for summary in scope {
-        // An inbox holds what other people sent you, and a login's name
+        // An inbox holds what other people sent you, and a field's name
         // decides a variable's name: searched only when asked for by name.
         if !named && summary.vault_type == VaultType::Inbox {
             continue;
@@ -117,104 +144,64 @@ pub async fn run(
             Err(_) => continue,
         };
         for login in heyl_vault::login::logins(&opened.document) {
-            if let Some(variable) = variable_name(&login, project.prefix()) {
-                found.push(Found {
-                    variable: variable.to_owned(),
+            // Only live logins: one you deleted must not keep injecting
+            // itself into builds.
+            if login.liveness() == Liveness::Live && project.matches(&login) {
+                candidates.push(Candidate {
                     tier: get::tier(summary.vault_type),
                     login,
-                    payload: opened.protected.clone(),
+                    protected: opened.protected.clone(),
                 });
             }
         }
     }
 
-    let mut variables = Vec::new();
-    for chosen in choose(found)? {
-        let value = match &chosen.found.login.password {
-            Some(password) => get::decrypt(&chosen.found.payload, password)?,
-            None => String::new(),
-        };
+    let match_count = candidates.len();
+    let chosen = get::rank(candidates).ok_or(AppError::NoProjectSecrets)?;
+    let variables = variables(&chosen.login, |value| match value {
+        FieldValue::Plain(s) => Ok(s.clone()),
+        FieldValue::Protected(p) => get::decrypt(&chosen.protected, p),
+    })?;
+    Ok(Resolved {
+        login: chosen.login.id,
+        match_count,
+        variables,
+    })
+}
+
+/// Turn a login's custom fields into variables, sorted by name.
+///
+/// Every name is checked before anything is decrypted. Generic over what
+/// decrypts a value, so the rules are testable without a key.
+fn variables(
+    login: &Login,
+    mut decrypt: impl FnMut(&FieldValue) -> Result<String, AppError>,
+) -> Result<Vec<Variable>, AppError> {
+    let mut seen = BTreeSet::new();
+    for field in &login.custom_fields {
+        if !is_variable_name(&field.name) {
+            return Err(AppError::InvalidVariableName {
+                login: login.id,
+                name: field.name.clone(),
+            });
+        }
+        if !seen.insert(field.name.as_str()) {
+            return Err(AppError::DuplicateVariable {
+                login: login.id,
+                name: field.name.clone(),
+            });
+        }
+    }
+
+    let mut variables = Vec::with_capacity(login.custom_fields.len());
+    for field in &login.custom_fields {
         variables.push(Variable {
-            name: chosen.found.variable,
-            value: Zeroizing::new(value),
-            candidates: chosen.candidates,
+            name: field.name.clone(),
+            value: Zeroizing::new(decrypt(&field.value)?),
         });
     }
+    variables.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(variables)
-}
-
-/// A login that carries the prefix, before anything is decrypted.
-///
-/// Generic over what decrypts it, so the selection rules are testable without
-/// a key.
-struct Found<T> {
-    variable: String,
-    tier: u8,
-    login: Login,
-    payload: T,
-}
-
-/// The winner for one variable, and how many it beat.
-struct Chosen<T> {
-    found: Found<T>,
-    candidates: usize,
-}
-
-/// The variable a login yields, if its name, title or a website carries the
-/// prefix.
-///
-/// Case-sensitive: what follows the `#` becomes a variable name verbatim. The
-/// display name is tried first, as it is what the app shows, then the title,
-/// then each website in order. A project login is written like a web address,
-/// so the website field is where the app most naturally stores it — and a
-/// website may carry a leading `https://` or `http://` the project does not.
-fn variable_name<'a>(login: &'a Login, prefix: &str) -> Option<&'a str> {
-    let names = login
-        .display_headline
-        .as_deref()
-        .into_iter()
-        .chain(std::iter::once(login.title.as_str()));
-    let websites = login.websites.iter().map(|w| {
-        w.strip_prefix("https://")
-            .or_else(|| w.strip_prefix("http://"))
-            .unwrap_or(w)
-    });
-    names
-        .chain(websites)
-        .find_map(|name| name.strip_prefix(prefix))
-}
-
-/// Apply DESIGN.md §5's selection rules: live logins only, every name valid,
-/// at least one match, and one winner per variable by `get`'s ranking.
-fn choose<T>(found: Vec<Found<T>>) -> Result<Vec<Chosen<T>>, AppError> {
-    let live: Vec<Found<T>> = found
-        .into_iter()
-        .filter(|f| f.login.liveness() == Liveness::Live)
-        .collect();
-    if live.is_empty() {
-        return Err(AppError::NoProjectSecrets);
-    }
-    if let Some(bad) = live.iter().find(|f| !is_variable_name(&f.variable)) {
-        return Err(AppError::InvalidVariableName {
-            login: bad.login.id,
-        });
-    }
-
-    let mut by_name: BTreeMap<String, Vec<Found<T>>> = BTreeMap::new();
-    for f in live {
-        by_name.entry(f.variable.clone()).or_default().push(f);
-    }
-    Ok(by_name
-        .into_values()
-        .filter_map(|mut group| {
-            let candidates = group.len();
-            group.sort_by(|a, b| get::ranking((&a.login, a.tier), (&b.login, b.tier)));
-            group
-                .into_iter()
-                .next()
-                .map(|found| Chosen { found, candidates })
-        })
-        .collect())
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*` — a name every shell and every OS accepts.
@@ -229,14 +216,11 @@ fn is_variable_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use heyl_domain::LoginId;
+    use heyl_vault::login::CustomField;
 
-    const PREFIX: &str = "github.com/mrh1997/heyl/prod#";
-
-    fn login(id: u8, name: &str, edited: &str) -> Login {
+    fn login(name: &str) -> Login {
         Login {
-            id: LoginId::parse(&format!("00000000-0000-4000-8000-0000000000{id:02x}"))
-                .expect("valid uuid"),
+            id: LoginId::parse("00000000-0000-4000-8000-000000000001").expect("valid uuid"),
             display_headline: Some(name.to_owned()),
             title: String::new(),
             username: String::new(),
@@ -246,170 +230,124 @@ mod tests {
             password: None,
             custom_fields: Vec::new(),
             created: None,
-            edited: Some(edited.to_owned()),
+            edited: Some("2026-01-01".to_owned()),
             change_time: None,
             is_deleted: false,
             is_archived: false,
         }
     }
 
-    fn found(login: Login, tier: u8, payload: &'static str) -> Option<Found<&'static str>> {
-        let variable = variable_name(&login, PREFIX)?.to_owned();
-        Some(Found {
-            variable,
-            tier,
-            login,
-            payload,
-        })
+    fn with_fields(fields: &[(&str, &str)]) -> Login {
+        let mut l = login("github.com/me/app");
+        l.custom_fields = fields
+            .iter()
+            .map(|(name, value)| CustomField {
+                id: None,
+                name: (*name).to_owned(),
+                value: FieldValue::Plain((*value).to_owned()),
+            })
+            .collect();
+        l
     }
 
-    /// The error, where success was wrong. `Chosen` is not `Debug` — it holds
-    /// what decrypts a secret — so `expect_err` is not available.
-    fn refused<T>(result: Result<T, AppError>) -> AppError {
-        match result {
-            Err(e) => e,
-            Ok(_) => panic!("expected a refusal"),
+    #[allow(clippy::unnecessary_wraps)] // the shape `variables` takes
+    fn plain(value: &FieldValue) -> Result<String, AppError> {
+        match value {
+            FieldValue::Plain(s) => Ok(s.clone()),
+            FieldValue::Protected(_) => panic!("tests use plain values"),
         }
     }
 
-    fn names<T>(chosen: &[Chosen<T>]) -> Vec<&str> {
-        chosen.iter().map(|c| c.found.variable.as_str()).collect()
+    fn project(url: &str) -> Project {
+        Project::parse(url).expect("valid")
     }
 
     #[test]
-    fn a_project_url_gets_a_hash_appended() {
-        let p = Project::parse("github.com/mrh1997/heyl/prod").expect("valid");
-        assert_eq!(p.prefix(), PREFIX);
-    }
-
-    #[test]
-    fn a_project_url_is_validated() {
-        for bad in [
-            "",
-            "https://github.com/x",
-            "heyl://github.com/x",
-            "github.com/x/",
-            "github.com/x#y",
-        ] {
+    fn only_an_empty_project_is_invalid() {
+        for bad in ["", "  ", "https://", "http://"] {
             let e = Project::parse(bad).expect_err(bad);
-            assert!(matches!(e, AppError::BadProject { .. }), "{bad}");
-            assert_eq!(e.exit_code() as u8, 7, "{bad}");
+            assert!(matches!(e, AppError::BadProject { .. }), "{bad:?}");
+            assert_eq!(e.exit_code() as u8, 7, "{bad:?}");
+        }
+        for good in ["github.com/me/app", "https://github.com/me/app/", "a#b"] {
+            assert!(Project::parse(good).is_ok(), "{good}");
         }
     }
 
     #[test]
-    fn the_prefix_must_be_followed_by_the_hash() {
-        let l = |name| login(1, name, "2026-01-01");
-        assert_eq!(
-            variable_name(&l("github.com/mrh1997/heyl/prod#DB"), PREFIX),
-            Some("DB")
-        );
-        // Another environment, the project as a whole, a longer environment
-        // name and a different case all miss.
+    fn the_whole_url_must_match_ignoring_case_and_scheme() {
+        let p = project("github.com/me/app/prod");
+        for hit in [
+            "github.com/me/app/prod",
+            "GitHub.com/me/App/prod",
+            "https://github.com/me/app/prod",
+            "http://github.com/me/app/prod",
+        ] {
+            assert!(p.matches(&login(hit)), "{hit}");
+        }
         for miss in [
-            "github.com/mrh1997/heyl/stage#DB",
-            "github.com/mrh1997/heyl#DB",
-            "github.com/mrh1997/heyl/production#DB",
-            "GitHub.com/mrh1997/heyl/prod#DB",
-            "heyl://github.com/mrh1997/heyl/prod#DB",
+            "github.com/me/app",
+            "github.com/me/app/production",
+            "github.com/me/app/prod#DB",
+            "heyl://github.com/me/app/prod",
             "github.com",
         ] {
-            assert_eq!(variable_name(&l(miss), PREFIX), None, "{miss}");
+            assert!(!p.matches(&login(miss)), "{miss}");
         }
+        // A scheme on the project is ignored, too.
+        assert!(
+            project("https://github.com/me/app/prod").matches(&login("github.com/me/app/prod"))
+        );
     }
 
     #[test]
-    fn the_title_counts_when_the_display_name_does_not_match() {
-        let mut l = login(1, "GitHub prod DB", "2026-01-01");
-        l.title = format!("{PREFIX}DATABASE_URL");
-        assert_eq!(variable_name(&l, PREFIX), Some("DATABASE_URL"));
-    }
+    fn title_and_websites_count() {
+        let p = project("github.com/me/app");
+        let mut l = login("My app");
+        l.title = "github.com/me/app".to_owned();
+        assert!(p.matches(&l));
 
-    #[test]
-    fn a_website_counts_with_or_without_a_scheme() {
-        // As the heylogin app stores one typed into the website field: no
-        // name, no title.
-        let mut l = login(1, "", "2026-01-01");
+        // As the heylogin app stores one typed into the website field.
+        let mut l = login("");
         l.display_headline = None;
-        l.websites = vec![format!("{PREFIX}TEST")];
-        assert_eq!(variable_name(&l, PREFIX), Some("TEST"));
-
-        l.websites = vec!["example.org".to_owned(), format!("https://{PREFIX}TOKEN")];
-        assert_eq!(variable_name(&l, PREFIX), Some("TOKEN"));
-
-        // Only the two web schemes are tolerated.
-        l.websites = vec![format!("heyl://{PREFIX}TOKEN")];
-        assert_eq!(variable_name(&l, PREFIX), None);
+        l.websites = vec![
+            "example.org".to_owned(),
+            "https://github.com/me/app".to_owned(),
+        ];
+        assert!(p.matches(&l));
     }
 
     #[test]
-    fn every_live_match_becomes_a_variable_sorted_by_name() {
-        let chosen = choose(
-            [
-                found(
-                    login(1, &format!("{PREFIX}STRIPE_KEY"), "2026-01-01"),
-                    0,
-                    "a",
-                ),
-                found(
-                    login(2, &format!("{PREFIX}DATABASE_URL"), "2026-01-01"),
-                    0,
-                    "b",
-                ),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+    fn custom_fields_become_variables_sorted_by_name() {
+        let vars = variables(
+            &with_fields(&[("STRIPE_KEY", "s"), ("DATABASE_URL", "d"), ("EMPTY", "")]),
+            plain,
         )
-        .expect("two variables");
-        assert_eq!(names(&chosen), ["DATABASE_URL", "STRIPE_KEY"]);
-        assert!(chosen.iter().all(|c| c.candidates == 1));
+        .expect("valid");
+        let got: Vec<(&str, &str)> = vars
+            .iter()
+            .map(|v| (v.name.as_str(), v.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [("DATABASE_URL", "d"), ("EMPTY", ""), ("STRIPE_KEY", "s")]
+        );
     }
 
     #[test]
-    fn archived_and_deleted_logins_are_skipped() {
-        let mut archived = login(1, &format!("{PREFIX}OLD"), "2026-01-01");
-        archived.is_deleted = true;
-        archived.is_archived = true;
-        let mut deleted = login(2, &format!("{PREFIX}GONE"), "2026-01-01");
-        deleted.is_deleted = true;
-        let live = login(3, &format!("{PREFIX}KEPT"), "2026-01-01");
-
-        let chosen = choose(
-            [
-                found(archived, 0, "a"),
-                found(deleted, 0, "b"),
-                found(live, 0, "c"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-        )
-        .expect("one live variable");
-        assert_eq!(names(&chosen), ["KEPT"]);
+    fn no_custom_fields_is_no_variables() {
+        let vars = variables(&with_fields(&[]), plain).expect("valid");
+        assert!(vars.is_empty());
     }
 
     #[test]
-    fn no_live_match_is_not_found() {
-        let e = refused(choose::<&str>(Vec::new()));
-        assert!(matches!(e, AppError::NoProjectSecrets));
-        assert_eq!(e.exit_code() as u8, 2);
-    }
-
-    #[test]
-    fn a_name_that_is_not_a_variable_fails_the_whole_run() {
+    fn a_field_name_that_is_not_a_variable_fails_the_whole_run() {
         for bad in ["", "1ST", "MY-VAR", "A B", "X=Y", "ÄRGER"] {
-            let e = refused(choose(
-                [found(
-                    login(7, &format!("{PREFIX}{bad}"), "2026-01-01"),
-                    0,
-                    "a",
-                )]
-                .into_iter()
-                .flatten()
-                .collect(),
-            ));
-            assert!(matches!(e, AppError::InvalidVariableName { .. }), "{bad:?}");
+            let e = variables(&with_fields(&[("OK", "1"), (bad, "2")]), plain).expect_err(bad);
+            assert!(
+                matches!(&e, AppError::InvalidVariableName { name, .. } if name == bad),
+                "{bad:?}"
+            );
             assert_eq!(e.exit_code() as u8, 7, "{bad:?}");
         }
         for good in ["A", "_", "_X1", "database_url", "Path"] {
@@ -418,35 +356,26 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_rank_private_first_then_most_recent() {
-        let name = format!("{PREFIX}TOKEN");
-        let chosen = choose(
-            [
-                // A newer team entry does not beat a private one…
-                found(
-                    login(1, &name, "2026-09-01"),
-                    get::tier(VaultType::Team),
-                    "team",
-                ),
-                found(
-                    login(2, &name, "2026-01-01"),
-                    get::tier(VaultType::Private),
-                    "old",
-                ),
-                // …but among private ones the most recent wins.
-                found(
-                    login(3, &name, "2026-05-01"),
-                    get::tier(VaultType::Private),
-                    "new",
-                ),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
-        )
-        .expect("one variable");
-        assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].found.payload, "new");
-        assert_eq!(chosen[0].candidates, 3);
+    fn a_repeated_field_name_fails_the_whole_run() {
+        let e = variables(&with_fields(&[("TOKEN", "a"), ("TOKEN", "b")]), plain)
+            .expect_err("duplicate");
+        assert!(matches!(&e, AppError::DuplicateVariable { name, .. } if name == "TOKEN"));
+        assert_eq!(e.exit_code() as u8, 7);
+    }
+
+    #[test]
+    fn names_are_checked_before_anything_is_decrypted() {
+        let mut decrypted = 0;
+        let e = variables(&with_fields(&[("GOOD", "a"), ("bad-name", "b")]), |v| {
+            decrypted += 1;
+            plain(v)
+        });
+        assert!(e.is_err());
+        assert_eq!(decrypted, 0);
+    }
+
+    #[test]
+    fn no_match_is_not_found() {
+        assert_eq!(AppError::NoProjectSecrets.exit_code() as u8, 2);
     }
 }

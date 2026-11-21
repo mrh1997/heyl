@@ -502,18 +502,25 @@ pub fn get(located: &Located, format: Format) {
     }
 }
 
-/// `run`'s notes, on stderr: which variables a ranking chose, and which
-/// replace a value heyl inherited. Names only — never a value.
+/// `run`'s notes, on stderr: which login a ranking chose, a login with
+/// nothing to add, and variables that replace a value heyl inherited. Names
+/// only — never a value.
 ///
 /// Nothing goes to stdout under any `--format`: stdout belongs to the child.
-pub fn run_notes(variables: &[heyl_app::run::Variable]) {
-    for variable in variables {
-        if variable.candidates > 1 {
-            eprintln!(
-                "heyl: {} logins yield {}; using the first by vault (private first), then the most recently changed.",
-                variable.candidates, variable.name
-            );
-        }
+pub fn run_notes(resolved: &heyl_app::run::Resolved) {
+    if resolved.match_count > 1 {
+        eprintln!(
+            "heyl: {} logins match this project; using {} (private first, then the most recently changed).",
+            resolved.match_count, resolved.login
+        );
+    }
+    if resolved.variables.is_empty() {
+        eprintln!(
+            "heyl: login {} has no custom fields; no variables added.",
+            resolved.login
+        );
+    }
+    for variable in &resolved.variables {
         if std::env::var_os(&variable.name).is_some() {
             eprintln!(
                 "heyl: {} is already set in the environment; the project's value replaces it.",

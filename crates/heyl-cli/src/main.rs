@@ -239,18 +239,20 @@ enum Command {
 
     /// Run a command with a project's secrets in its environment.
     ///
-    /// Every live login whose name, title or website is `<project>#<VARIABLE>`
-    /// becomes one variable: the
-    /// part after the `#` is its name, the login's password its value. So with
-    /// `--project github.com/me/app/prod`, a login named
-    /// `github.com/me/app/prod#DATABASE_URL` sets `DATABASE_URL`.
+    /// The project is one login: the one whose name, title or website is the
+    /// project URL (case-insensitive; a leading https:// or http:// is
+    /// ignored). Each of its custom fields becomes one variable: the field's
+    /// name is the variable's name, its value the variable's value. So with
+    /// `--project github.com/me/app/prod`, a login with that website and a
+    /// custom field `DATABASE_URL` sets `DATABASE_URL`.
     ///
     /// Without `-v`/`-V`, every readable login vault except the inbox is
-    /// searched; with one, only that vault. The command after `--` inherits
+    /// searched; with one, only that vault. If several logins match, the
+    /// private one wins, then the most recently changed. The command after `--` inherits
     /// heyl's environment plus these variables, and its exit code is heyl's.
     /// The values never reach disk, argv or stdout.
     Run {
-        /// The project, e.g. `github.com/me/app` or `github.com/me/app/prod`.
+        /// The project login's URL, e.g. `github.com/me/app/prod`.
         #[arg(long, value_name = "PROJECT")]
         project: String,
 
@@ -574,11 +576,11 @@ async fn run_project(
 ) -> Result<std::process::ExitCode, AppError> {
     let project = heyl_app::run::Project::parse(project)?;
     let vault = heyl_app::get::VaultSelector::from_flags(vault_name, vault_id)?;
-    let variables = heyl_app::run::run(ports, slot, &project, &vault, wait).await?;
+    let resolved = heyl_app::run::run(ports, slot, &project, &vault, wait).await?;
     // Before the child starts, not after it exits: a strict slot must
     // not stay unlocked for as long as a build runs (DESIGN.md §5).
     heyl_app::session::finish(ports, slot).await;
-    output::run_notes(&variables);
+    output::run_notes(&resolved);
 
     let (program, args) = command
         .split_first()
@@ -586,13 +588,14 @@ async fn run_project(
     let outcome = heyl_platform::child::run(
         program,
         args,
-        variables
+        resolved
+            .variables
             .iter()
             .map(|v| (v.name.as_str(), v.value.as_str())),
     )
     .await;
     // The values are wiped here, before heyl reports anything.
-    drop(variables);
+    drop(resolved);
 
     match outcome {
         Ok(code) => Ok(child_exit(code)),

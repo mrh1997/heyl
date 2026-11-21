@@ -1,5 +1,7 @@
 # Changelog
 
+- Security: updated the bundled TLS library (rustls) and other dependencies to versions that
+  fix recently published advisories.
 - `heyl run --project <url>` now reads a single login — the one whose address is the project
   URL — and puts each of its custom fields into the command's environment (field name = variable
   name). The old `<project>#VARIABLE` login naming no longer works.

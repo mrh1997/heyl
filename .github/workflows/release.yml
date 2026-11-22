@@ -267,9 +267,16 @@ jobs:
         with:
           ref: v${{ needs.prepare.outputs.version }}
           persist-credentials: false
+      # Only this workflow's packages: the reusable CI run uploads raw,
+      # unpackaged binaries into the same run, and they must not ship.
       - uses: actions/download-artifact@v8
         with:
-          pattern: '*-*'
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: archive-*
           path: dist
           merge-multiple: true
       - name: Release notes from this version's CHANGELOG chapter

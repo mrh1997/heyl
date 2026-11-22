@@ -1,7 +1,8 @@
 # Changelog
 
 - Fixed the nightly release, which failed before building anything, so `heyl` is now actually
-  published to PyPI (`uvx heyl ...`) and GitHub Releases.
+  published to PyPI (`uvx heyl ...`) and GitHub Releases. A GitHub release carries only the
+  wheels, the per-platform archives and their checksums.
 - Security: updated the bundled TLS library (rustls) and other dependencies to versions that
   fix recently published advisories.
 - `heyl run --project <url>` now reads a single login — the one whose address is the project

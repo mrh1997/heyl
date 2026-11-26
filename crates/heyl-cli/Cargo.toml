@@ -1,6 +1,6 @@
 [package]
 name        = "heyl"
-version     = "2026.11.22"
+version     = "2026.11.26"
 description = "Unofficial command-line client for heylogin: retrieve passwords, TOTP codes and custom fields from your vault."
 edition.workspace      = true
 rust-version.workspace = true

@@ -1,5 +1,7 @@
 # Changelog
 
+## Release 2026.11.26
+
 - The README is now a user guide: installing, reading logins, `heyl run`, AI agents, sessions,
   approvals, scripting, troubleshooting, and what heyl's security does and does not cover.
 
